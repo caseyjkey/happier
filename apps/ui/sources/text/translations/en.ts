@@ -137,7 +137,7 @@ export const en = {
         restoreAccount: 'Restore Account',
         enterSecretKey: 'Please enter a secret key',
         invalidSecretKey: 'Invalid secret key. Please check and try again.',
-        enterUrlManually: 'Enter URL manually',
+        enterUrlManually: 'Enter URL Manually',
         openMachine: 'Open machine',
         terminalUrlPlaceholder: 'happier://terminal?...',
         restoreQrInstructions: '1. Open Happier on your mobile device\n2. Go to Settings → Account\n3. Tap "Link New Device"\n4. Scan this QR code',
@@ -219,7 +219,7 @@ export const en = {
     },
 
     settingsProviders: {
-        title: 'AI backends',
+        title: 'AI Backends',
         entrySubtitle: 'View capabilities and configure each backend',
         footer: 'Manage backend availability, capabilities, model support, and provider-specific settings.',
         providerSubtitle: 'Backend settings',

@@ -379,7 +379,7 @@ export const SettingsView = React.memo(function SettingsView() {
                     onPress={() => router.push('/server')}
                 />
                 <Item
-                    title="Source control"
+                    title="Source Control"
                     subtitle="Commit strategy and backend behavior"
                     icon={<Ionicons name="git-branch-outline" size={29} color="#34C759" />}
                     onPress={() => router.push('/(app)/settings/source-control')}
