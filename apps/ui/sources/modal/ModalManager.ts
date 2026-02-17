@@ -52,8 +52,22 @@ class ModalManagerClass implements IModal {
             destructive?: boolean;
         }
     ): Promise<boolean> {
-        if (Platform.OS === 'web') {
-            // Show custom web modal
+        return this.confirmCustom(title, message, options);
+    }
+
+    async confirmCustom(
+        title: string,
+        message?: string,
+        options?: {
+            cancelText?: string;
+            confirmText?: string;
+            destructive?: boolean;
+            icon?: React.ReactNode;
+            onConfirm?: () => void;
+        }
+    ): Promise<boolean> {
+        if (Platform.OS === 'web' || options?.icon) {
+            // Show custom web modal (or custom modal with icon)
             if (!this.showModalFn) {
                 console.error('ModalManager not initialized. Make sure ModalProvider is mounted.');
                 return false;
@@ -65,14 +79,16 @@ class ModalManagerClass implements IModal {
                 message,
                 cancelText: options?.cancelText,
                 confirmText: options?.confirmText,
-                destructive: options?.destructive
+                destructive: options?.destructive,
+                icon: options?.icon,
+                onConfirm: options?.onConfirm,
             } as Omit<ModalConfig, 'id'>);
 
             return new Promise<boolean>((resolve) => {
                 this.confirmResolvers.set(modalId, resolve);
             });
         } else {
-            // Use native alert
+            // Use native alert (no icon support)
             return new Promise<boolean>((resolve) => {
                 Alert.alert(
                     title,
@@ -86,7 +102,10 @@ class ModalManagerClass implements IModal {
                         {
                             text: options?.confirmText || t('common.ok'),
                             style: options?.destructive ? 'destructive' : 'default',
-                            onPress: () => resolve(true)
+                            onPress: () => {
+                                options?.onConfirm?.();
+                                resolve(true);
+                            }
                         }
                     ],
                     { cancelable: false }

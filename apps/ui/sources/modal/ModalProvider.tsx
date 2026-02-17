@@ -90,7 +90,12 @@ export function ModalProvider({ children }: { children: React.ReactNode }) {
                                 onClose={() => hideModal(modal.id)}
                                 onConfirm={(value) => {
                                     Modal.resolveConfirm(modal.id, value);
-                                    hideModal(modal.id);
+                                }}
+                                onConfirmAction={() => {
+                                    // This is called after the user confirms, before hiding modal
+                                    if ('onConfirm' in modal) {
+                                        modal.onConfirm?.();
+                                    }
                                 }}
                                 showBackdrop={showBackdrop}
                                 zIndexBase={modalZIndexBase}

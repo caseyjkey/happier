@@ -1059,7 +1059,13 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
         failedToConnectTerminal: '連線終端失敗',
         cameraPermissionsRequiredToConnectTerminal: '連線終端需要相機權限',
         failedToLinkDevice: '連結裝置失敗',
-        cameraPermissionsRequiredToScanQr: '掃描 QR Code 需要相機權限'
+        cameraPermissionsRequiredToScanQr: '掃描 QR Code 需要相機權限',
+        deviceAlreadyLinked: 'Device Already Linked',
+        deviceLinkAlreadyUsedDescription: 'This link was already used by another device. Each link can only be used once.',
+        addingNewMachine: 'Adding New Machine',
+        addingNewMachineDescription: 'You are adding a new machine to your account. This machine will be able to run coding sessions using your credentials.',
+        linkNewDeviceTitle: 'Link New Device',
+        linkNewDeviceConfirmation: 'Are you trying to log into Happier on another device?'
     },
 
     navigation: {

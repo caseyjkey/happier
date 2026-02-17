@@ -1661,7 +1661,13 @@ deps: {
         failedToConnectTerminal: 'Ha fallat connectar el terminal',
         cameraPermissionsRequiredToConnectTerminal: 'Es requereixen permisos de càmera per connectar el terminal',
         failedToLinkDevice: 'Ha fallat enllaçar el dispositiu',
-        cameraPermissionsRequiredToScanQr: 'Es requereixen permisos de càmera per escanejar codis QR'
+        cameraPermissionsRequiredToScanQr: 'Es requereixen permisos de càmera per escanejar codis QR',
+        deviceAlreadyLinked: 'Device Already Linked',
+        deviceLinkAlreadyUsedDescription: 'This link was already used by another device. Each link can only be used once.',
+        addingNewMachine: 'Adding New Machine',
+        addingNewMachineDescription: 'You are adding a new machine to your account. This machine will be able to run coding sessions using your credentials.',
+        linkNewDeviceTitle: 'Link New Device',
+        linkNewDeviceConfirmation: 'Are you trying to log into Happier on another device?'
     },
 
     navigation: {

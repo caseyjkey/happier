@@ -1938,6 +1938,12 @@ export const pt: TranslationStructure = {
     failedToLinkDevice: "Falha ao vincular dispositivo",
     cameraPermissionsRequiredToScanQr:
       "Permissões de câmera são necessárias para escanear códigos QR",
+        deviceAlreadyLinked: 'Device Already Linked',
+        deviceLinkAlreadyUsedDescription: 'This link was already used by another device. Each link can only be used once.',
+        addingNewMachine: 'Adding New Machine',
+        addingNewMachineDescription: 'You are adding a new machine to your account. This machine will be able to run coding sessions using your credentials.',
+        linkNewDeviceTitle: 'Link New Device',
+        linkNewDeviceConfirmation: 'Are you trying to log into Happier on another device?'
   },
 
   navigation: {

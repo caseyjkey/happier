@@ -10,7 +10,7 @@ import { Typography } from "@/constants/Typography";
 import { Item } from '@/components/ui/lists/Item';
 import { ItemGroup } from '@/components/ui/lists/ItemGroup';
 import { ItemList } from '@/components/ui/lists/ItemList';
-import { useConnectTerminal } from '@/hooks/session/useConnectTerminal';
+import { useSmartLinkDevice } from '@/hooks/auth/useSmartLinkDevice';
 import { useAuth } from '@/auth/context/AuthContext';
 import { useEntitlement, useLocalSettingMutable, useSetting, useAllMachines, useProfile, useMachineListByServerId, useMachineListStatusByServerId } from '@/sync/domains/state/storage';
 import { sync } from '@/sync/sync';
@@ -87,7 +87,7 @@ export const SettingsView = React.memo(function SettingsView() {
 
     const showHiddenSettingsButtons = devModeEnabled;
 
-    const { connectTerminal, connectWithUrl, isLoading } = useConnectTerminal();
+    const { linkNewDevice, linkWithUrl, isLoading } = useSmartLinkDevice();
     const [refreshingMachines, refreshMachines] = useHappyAction(async () => {
         await sync.refreshMachinesThrottled({ force: true });
     });
@@ -245,9 +245,9 @@ export const SettingsView = React.memo(function SettingsView() {
             {Platform.OS !== 'web' && (
                 <ItemGroup>
                     <Item
-                        title={t('settings.scanQrCodeToAuthenticate')}
+                        title={t('modals.linkNewDeviceTitle')}
                         icon={<Ionicons name="qr-code-outline" size={29} color="#007AFF" />}
-                        onPress={connectTerminal}
+                        onPress={linkNewDevice}
                         loading={isLoading}
                         showChevron={false}
                     />
@@ -256,7 +256,7 @@ export const SettingsView = React.memo(function SettingsView() {
                         icon={<Ionicons name="link-outline" size={29} color="#007AFF" />}
                         onPress={async () => {
                             const url = await Modal.prompt(
-                                t('modals.authenticateTerminal'),
+                                t('modals.linkNewDeviceTitle'),
                                 t('modals.pasteUrlFromTerminal'),
                                 {
                                     placeholder: 'happier://terminal?...',
@@ -264,7 +264,7 @@ export const SettingsView = React.memo(function SettingsView() {
                                 }
                             );
                             if (url?.trim()) {
-                                connectWithUrl(url.trim());
+                                linkWithUrl(url.trim());
                             }
                         }}
                         showChevron={false}

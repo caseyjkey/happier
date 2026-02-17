@@ -27,6 +27,8 @@ export interface ConfirmModalConfig extends BaseModalConfig {
     cancelText?: string;
     confirmText?: string;
     destructive?: boolean;
+    icon?: ReactNode;
+    onConfirm?: () => void;
 }
 
 export interface PromptModalConfig extends BaseModalConfig {
@@ -74,6 +76,13 @@ export interface IModal {
         cancelText?: string;
         confirmText?: string;
         destructive?: boolean;
+    }): Promise<boolean>;
+    confirmCustom(title: string, message?: string, options?: {
+        cancelText?: string;
+        confirmText?: string;
+        destructive?: boolean;
+        icon?: ReactNode;
+        onConfirm?: () => void;
     }): Promise<boolean>;
     prompt(title: string, message?: string, options?: {
         placeholder?: string;

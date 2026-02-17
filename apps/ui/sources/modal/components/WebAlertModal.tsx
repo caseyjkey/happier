@@ -12,6 +12,7 @@ interface WebAlertModalProps {
     onConfirm?: (value: boolean) => void;
     showBackdrop?: boolean;
     zIndexBase?: number;
+    onConfirmAction?: () => void;
 }
 
 const stylesheet = StyleSheet.create((theme) => ({
@@ -29,11 +30,18 @@ const stylesheet = StyleSheet.create((theme) => ({
         shadowRadius: 4,
         elevation: 5,
     },
+    iconContainer: {
+        paddingTop: 20,
+        paddingHorizontal: 16,
+        alignItems: 'center',
+    },
     content: {
         paddingHorizontal: 16,
-        paddingTop: 20,
         paddingBottom: 16,
         alignItems: 'center',
+    },
+    contentWithIcon: {
+        paddingTop: 12,
     },
     title: {
         fontSize: 17,
@@ -90,14 +98,19 @@ const stylesheet = StyleSheet.create((theme) => ({
     },
 }));
 
-export function WebAlertModal({ config, onClose, onConfirm, showBackdrop = true, zIndexBase }: WebAlertModalProps) {
+export function WebAlertModal({ config, onClose, onConfirm, showBackdrop = true, zIndexBase, onConfirmAction }: WebAlertModalProps) {
     useUnistyles();
     const styles = stylesheet;
     const isConfirm = config.type === 'confirm';
-    
+    const hasIcon = isConfirm && 'icon' in config && !!config.icon;
+
     const handleButtonPress = (buttonIndex: number) => {
         if (isConfirm && onConfirm) {
-            onConfirm(buttonIndex === 1);
+            const confirmed = buttonIndex === 1;
+            onConfirm(confirmed);
+            if (confirmed && onConfirmAction && 'onConfirm' in config) {
+                config.onConfirm?.();
+            }
         } else if (!isConfirm && config.buttons?.[buttonIndex]?.onPress) {
             config.buttons[buttonIndex].onPress!();
         }
@@ -124,7 +137,12 @@ export function WebAlertModal({ config, onClose, onConfirm, showBackdrop = true,
             zIndexBase={zIndexBase}
         >
             <View style={styles.container}>
-                <View style={styles.content}>
+                {hasIcon && (
+                    <View style={styles.iconContainer}>
+                        {config.icon}
+                    </View>
+                )}
+                <View style={[styles.content, hasIcon && styles.contentWithIcon]}>
                     <Text style={[styles.title, Typography.default('semiBold')]}>
                         {config.title}
                     </Text>
