@@ -7,9 +7,10 @@ import { decodeBase64, encodeBase64 } from '@/encryption/base64';
 import { storage } from './domains/state/storage';
 import { ApiMessage } from './api/types/apiTypes';
 import type { ApiEphemeralActivityUpdate } from './api/types/apiTypes';
-import { Session, Machine, type Metadata } from './domains/state/storageTypes';
+import { Session, Machine, MetadataSchema, type Metadata } from './domains/state/storageTypes';
 import { InvalidateSync } from '@/utils/sessions/sync';
 import { ActivityUpdateAccumulator } from './reducer/activityUpdateAccumulator';
+import { MachineActivityAccumulator, type MachineActivityUpdate } from './reducer/machineActivityAccumulator';
 import { randomUUID } from '@/platform/randomUUID';
 import { Platform, AppState } from 'react-native';
 import { resolveSentFrom } from './domains/messages/sentFrom';
@@ -120,6 +121,7 @@ import {
 } from './engine/pending/pendingQueueV2';
 import {
     flushActivityUpdates as flushActivityUpdatesEngine,
+    flushMachineActivityUpdates as flushMachineActivityUpdatesEngine,
     handleEphemeralSocketUpdate,
     handleSocketReconnected,
     handleSocketUpdate,
@@ -179,6 +181,7 @@ class Sync {
     private todosSync: InvalidateSync;
     private automationsSync: InvalidateSync;
     private activityAccumulator: ActivityUpdateAccumulator;
+    private machineActivityAccumulator!: MachineActivityAccumulator;
     private pendingSettings: Partial<Settings> = loadPendingSettings();
     private pendingSettingsFlushTimer: ReturnType<typeof setTimeout> | null = null;
     private pendingSettingsDirty = false;
@@ -244,24 +247,27 @@ class Sync {
         }
         this.pushTokenSync = new InvalidateSync(registerPushToken);
         this.activityAccumulator = new ActivityUpdateAccumulator(this.flushActivityUpdates.bind(this), 500);
+        this.machineActivityAccumulator = new MachineActivityAccumulator(this.flushMachineActivityUpdates.bind(this), 300);
 
         // Listen for app state changes to refresh purchases
         AppState.addEventListener('change', (nextAppState) => {
             if (nextAppState === 'active') {
                 log.log('📱 App became active');
-                this.purchasesSync.invalidate();
-                this.profileSync.invalidate();
-                this.machinesSync.invalidate();
-                this.pushTokenSync.invalidate();
-                this.sessionsSync.invalidate();
-                this.nativeUpdateSync.invalidate();
+                // Many devices/platforms can emit multiple "active" transitions in quick succession.
+                // Coalesce invalidations to avoid redundant double-runs that can spike API load.
+                this.purchasesSync.invalidateCoalesced();
+                this.profileSync.invalidateCoalesced();
+                this.machinesSync.invalidateCoalesced();
+                this.pushTokenSync.invalidateCoalesced();
+                this.sessionsSync.invalidateCoalesced();
+                this.nativeUpdateSync.invalidateCoalesced();
                 log.log('📱 App became active: Invalidating artifacts sync');
-                this.artifactsSync.invalidate();
-                this.friendsSync.invalidate();
-                this.friendRequestsSync.invalidate();
-                this.feedSync.invalidate();
-                this.todosSync.invalidate();
-                this.automationsSync.invalidate();
+                this.artifactsSync.invalidateCoalesced();
+                this.friendsSync.invalidateCoalesced();
+                this.friendRequestsSync.invalidateCoalesced();
+                this.feedSync.invalidateCoalesced();
+                this.todosSync.invalidateCoalesced();
+                this.automationsSync.invalidateCoalesced();
             } else {
                 log.log(`📱 App state changed to: ${nextAppState}`);
                 // Reliability: ensure we persist any pending settings immediately when backgrounding.
@@ -345,14 +351,14 @@ class Sync {
         }
         await this.#init();
 
-        // Await settings sync to have fresh settings
-        await this.settingsSync.awaitQueue();
-
-        // Await profile sync to have fresh profile
-        await this.profileSync.awaitQueue();
-
-        // Await purchases sync to have fresh purchases
-        await this.purchasesSync.awaitQueue();
+        // UX: avoid blocking login forever if initial sync fetches hang/retry indefinitely.
+        // We still kick off the sync work in #init(); this just bounds the time we block the login call.
+        const initialAwaitTimeoutMs = 2500;
+        await Promise.all([
+            this.settingsSync.awaitQueue({ timeoutMs: initialAwaitTimeoutMs }),
+            this.profileSync.awaitQueue({ timeoutMs: initialAwaitTimeoutMs }),
+            this.purchasesSync.awaitQueue({ timeoutMs: initialAwaitTimeoutMs }),
+        ]);
     }
 
     async restore(credentials: AuthCredentials, encryption: Encryption) {
@@ -380,6 +386,7 @@ class Sync {
     private resetServerScopedRuntimeState = () => {
         apiSocket.disconnect();
         this.activityAccumulator.reset();
+        this.machineActivityAccumulator.reset();
 
         for (const timer of this.pendingMessageCommitRetryTimers.values()) {
             clearTimeout(timer);
@@ -543,14 +550,6 @@ class Sync {
     async sendMessage(sessionId: string, text: string, displayText?: string, metaOverrides?: Record<string, unknown>) {
         storage.getState().markSessionOptimisticThinking(sessionId);
 
-        // Get encryption
-        const encryption = this.encryption.getSessionEncryption(sessionId);
-        if (!encryption) { // Should never happen
-            storage.getState().clearSessionOptimisticThinking(sessionId);
-            console.error(`Session ${sessionId} not found`);
-            return;
-        }
-
         // Get session data from storage
         const session = storage.getState().sessions[sessionId];
         if (!session) {
@@ -558,6 +557,8 @@ class Sync {
             console.error(`Session ${sessionId} not found in storage`);
             return;
         }
+
+        const sessionEncryptionMode: 'e2ee' | 'plain' = session.encryptionMode === 'plain' ? 'plain' : 'e2ee';
 
         try {
             // Read permission mode from session state
@@ -594,7 +595,17 @@ class Sync {
                     metaOverrides: metaOverrides as any,
                 })
             };
-            const encryptedRawRecord = await encryption.encryptRawRecord(content);
+
+            const messagePayload =
+                sessionEncryptionMode === 'plain'
+                    ? { t: 'plain' as const, v: content }
+                    : await (async () => {
+                        const encryption = this.encryption.getSessionEncryption(sessionId);
+                        if (!encryption) {
+                            throw new Error(`Session ${sessionId} encryption not found`);
+                        }
+                        return await encryption.encryptRawRecord(content);
+                    })();
 
             // Track this outbound user message in the local pending queue until it is committed.
             // This prevents “ghost” optimistic transcript items when the send fails, and it lets the UI
@@ -617,7 +628,7 @@ class Sync {
 
             const payload = {
                 sid: sessionId,
-                message: encryptedRawRecord,
+                message: messagePayload,
                 localId,
                 sentFrom,
                 permissionMode: permissionMode || 'default'
@@ -858,8 +869,10 @@ class Sync {
     }
 
     private async updateSessionMetadataWithRetry(sessionId: string, updater: (metadata: Metadata) => Metadata): Promise<void> {
-        const encryption = this.encryption.getSessionEncryption(sessionId);
-        if (!encryption) {
+        const session = storage.getState().sessions[sessionId] ?? null;
+        const sessionEncryptionMode: 'e2ee' | 'plain' = session?.encryptionMode === 'plain' ? 'plain' : 'e2ee';
+        const encryption = sessionEncryptionMode === 'plain' ? null : this.encryption.getSessionEncryption(sessionId);
+        if (sessionEncryptionMode === 'e2ee' && !encryption) {
             throw new Error(`Session ${sessionId} not found`);
         }
 
@@ -873,8 +886,24 @@ class Sync {
             refreshSessions: async () => {
                 await this.refreshSessions();
             },
-            encryptMetadata: async (metadata) => encryption.encryptMetadata(metadata),
-            decryptMetadata: async (version, encrypted) => encryption.decryptMetadata(version, encrypted),
+            encryptMetadata: async (metadata) => {
+                if (sessionEncryptionMode === 'plain') {
+                    return JSON.stringify(metadata);
+                }
+                return await encryption!.encryptMetadata(metadata);
+            },
+            decryptMetadata: async (version, encrypted) => {
+                if (sessionEncryptionMode !== 'plain') {
+                    return await encryption!.decryptMetadata(version, encrypted);
+                }
+                try {
+                    const parsedJson = JSON.parse(encrypted);
+                    const parsed = MetadataSchema.safeParse(parsedJson);
+                    return parsed.success ? parsed.data : null;
+                } catch {
+                    return null;
+                }
+            },
             emitUpdateMetadata: async (payload) => apiSocket.emitWithAck<UpdateMetadataAck>('update-metadata', payload),
             applySessionMetadata: ({ metadataVersion, metadata }) => {
                 const currentSession = storage.getState().sessions[sessionId];
@@ -1982,6 +2011,7 @@ class Sync {
             },
             assumeUsers: (userIds) => this.assumeUsers(userIds),
             applyTodoSocketUpdates: (changes) => this.applyTodoSocketUpdates(changes),
+            invalidateMachines: () => this.machinesSync.invalidate(),
             invalidateSessions: () => this.sessionsSync.invalidate(),
             invalidateArtifacts: () => this.artifactsSync.invalidate(),
             invalidateFriends: () => this.friendsSync.invalidate(),
@@ -1998,11 +2028,18 @@ class Sync {
         flushActivityUpdatesEngine({ updates, applySessions: (sessions) => this.applySessions(sessions) });
     }
 
+    private flushMachineActivityUpdates = (updates: Map<string, MachineActivityUpdate>) => {
+        flushMachineActivityUpdatesEngine({ updates, applyMachines: (machines) => storage.getState().applyMachines(machines) });
+    }
+
     private handleEphemeralUpdate = (update: unknown) => {
         handleEphemeralSocketUpdate({
             update,
             addActivityUpdate: (ephemeralUpdate) => {
                 this.activityAccumulator.addUpdate(ephemeralUpdate);
+            },
+            addMachineActivityUpdate: (machineUpdate) => {
+                this.machineActivityAccumulator.addUpdate(machineUpdate);
             },
         });
     }

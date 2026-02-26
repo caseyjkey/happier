@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { ActivityIndicator, Pressable, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, View } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
@@ -13,11 +13,15 @@ import { ExecutionRunRow } from '@/components/sessions/runs/ExecutionRunRow';
 import { ConstrainedScreenContent } from '@/components/ui/layout/ConstrainedScreenContent';
 import { Modal } from '@/modal';
 import { t } from '@/text';
+import { tryShowDaemonUnavailableAlertForRpcFailure } from '@/utils/errors/daemonUnavailableAlert';
 import { useMachineListByServerId, useMachineListStatusByServerId } from '@/sync/domains/state/storage';
 import { machineExecutionRunsList } from '@/sync/ops/machineExecutionRuns';
 import { sessionExecutionRunStop } from '@/sync/ops/sessionExecutionRuns';
 import { machineStopSession } from '@/sync/ops/machines';
 import { isMachineOnline } from '@/utils/sessions/machineUtils';
+import { Text } from '@/components/ui/text/Text';
+import { useMountedShouldContinue } from '@/hooks/ui/useMountedShouldContinue';
+
 
 type MachineRunsState =
   | { status: 'idle' }
@@ -49,6 +53,7 @@ function formatRunDetails(run: DaemonExecutionRunEntry): string {
 export default function RunsScreen() {
   const { theme } = useUnistyles();
   const router = useRouter();
+  const shouldContinue = useMountedShouldContinue();
   const machineListByServerId = useMachineListByServerId();
   const machineListStatusByServerId = useMachineListStatusByServerId();
   const [showFinished, setShowFinished] = React.useState(false);
@@ -192,6 +197,23 @@ export default function RunsScreen() {
                         const onStop = async () => {
                           if (!canStop) return;
                           setStoppingRunId(run.runId);
+                          const stopSessionProcess = async () => {
+                            const stopResult = await machineStopSession(machineId, run.happySessionId, { serverId });
+                            if (stopResult.ok) return;
+
+                            const shownDaemonUnavailable = tryShowDaemonUnavailableAlertForRpcFailure({
+                              rpcErrorCode: stopResult.errorCode ?? null,
+                              message: stopResult.error ?? null,
+                              machine,
+                              onRetry: () => {
+                                void stopSessionProcess();
+                              },
+                              shouldContinue,
+                            });
+                            if (!shownDaemonUnavailable) {
+                              Modal.alert(t('common.error'), stopResult.error || 'Failed to stop session');
+                            }
+                          };
                           try {
                             const res = await sessionExecutionRunStop(run.happySessionId, { runId: run.runId }, { serverId });
                             if ((res as any)?.ok === false) {
@@ -201,10 +223,7 @@ export default function RunsScreen() {
                                 { confirmText: 'Stop session', cancelText: 'Cancel', destructive: true },
                               );
                               if (confirmed) {
-                                const stopResult = await machineStopSession(machineId, run.happySessionId, { serverId });
-                                if (!stopResult.ok) {
-                                  Modal.alert(t('common.error'), stopResult.error || 'Failed to stop session');
-                                }
+                                await stopSessionProcess();
                               } else {
                                 Modal.alert(t('common.error'), String((res as any).error ?? 'Failed to stop run'));
                               }
@@ -216,10 +235,7 @@ export default function RunsScreen() {
                               { confirmText: 'Stop session', cancelText: 'Cancel', destructive: true },
                             );
                             if (confirmed) {
-                              const stopResult = await machineStopSession(machineId, run.happySessionId, { serverId });
-                              if (!stopResult.ok) {
-                                Modal.alert(t('common.error'), stopResult.error || 'Failed to stop session');
-                              }
+                              await stopSessionProcess();
                             } else {
                               Modal.alert(t('common.error'), error instanceof Error ? error.message : 'Failed to stop run');
                             }
@@ -246,7 +262,7 @@ export default function RunsScreen() {
                                 {stoppingRunId === run.runId ? (
                                   <ActivityIndicator size="small" color={theme.colors.textSecondary} />
                                 ) : (
-                                  <Ionicons name="stop-circle-outline" size={20} color="#FF9500" />
+                                  <Ionicons name="stop-circle-outline" size={20} color={theme.colors.accent.orange} />
                                 )}
                               </Pressable>
                             ) : null}

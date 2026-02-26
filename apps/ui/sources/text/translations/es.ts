@@ -142,6 +142,10 @@ export const es: TranslationStructure = {
     terminalUrlPlaceholder: "happier://terminal?...",
     restoreQrInstructions:
       '1. Abre Happier en tu dispositivo móvil\n2. Ve a Configuración → Cuenta\n3. Toca "Vincular nuevo dispositivo"\n4. Escanea este código QR',
+    externalAuthVerifiedTitle: ({ provider }: { provider: string }) =>
+      `${provider} verificado`,
+    externalAuthVerifiedBody: ({ provider }: { provider: string }) =>
+      `Encontramos una cuenta existente de Happier vinculada a ${provider}. Para terminar de iniciar sesión en este dispositivo, restaura tu clave de cuenta con el código QR o tu clave secreta.`,
     restoreWithSecretKeyInstead: "Restaurar con clave secreta",
     restoreWithSecretKeyDescription:
       "Ingresa tu clave secreta para recuperar el acceso a tu cuenta.",
@@ -372,6 +376,19 @@ export const es: TranslationStructure = {
     compactSessionViewMinimal: "Vista compacta mínima",
     compactSessionViewMinimalDescription:
       "Quita los avatares y muestra un diseño de fila de sesión muy compacto",
+    text: "Texto",
+    textDescription: "Ajusta el tamaño del texto en la app",
+    textSize: "Tamaño del texto",
+    textSizeDescription: "Haz el texto más grande o más pequeño",
+    textSizeOptions: {
+      xxsmall: "Muy muy pequeño",
+      xsmall: "Muy pequeño",
+      small: "Pequeño",
+      default: "Predeterminado",
+      large: "Grande",
+      xlarge: "Muy grande",
+      xxlarge: "Muy muy grande",
+    },
   },
 
   settingsFeatures: {
@@ -569,7 +586,7 @@ export const es: TranslationStructure = {
       "Para reanudar una conversación de Codex, instala el servidor de reanudación de Codex en la máquina de destino (Detalles de la máquina → Reanudación de Codex).",
     codexAcpNotInstalledTitle: "Codex ACP no está instalado en esta máquina",
     codexAcpNotInstalledMessage:
-      "Para usar el experimento de Codex ACP, instala codex-acp en la máquina de destino (Detalles de la máquina → Codex ACP) o desactiva el experimento.",
+      "Para usar el experimento de Codex ACP, instala codex-acp en la máquina de destino (Detalles de la máquina → Installables) o desactiva el experimento.",
   },
 
   deps: {
@@ -1034,6 +1051,8 @@ export const es: TranslationStructure = {
     kiloSessionIdCopied: "ID de sesión de Kilo copiado al portapapeles",
     piSessionId: "ID de sesión de Pi",
     piSessionIdCopied: "ID de sesión de Pi copiado al portapapeles",
+    copilotSessionId: "Copilot Session ID",
+    copilotSessionIdCopied: "Copilot Session ID copied to clipboard",
     metadataCopied: "Metadatos copiados al portapapeles",
     failedToCopyMetadata: "Falló al copiar metadatos",
     failedToKillSession: "Falló al terminar sesión",
@@ -1196,6 +1215,7 @@ export const es: TranslationStructure = {
       kimi: "Kimi",
       kilo: "Kilo",
       pi: "Pi",
+      copilot: "Copilot",
     },
     auggieIndexingChip: {
       on: "Indexing on",
@@ -1443,6 +1463,19 @@ export const es: TranslationStructure = {
     file: "Archivo",
     fileEmpty: "El archivo está vacío",
     noChanges: "No hay cambios que mostrar",
+  },
+
+  settingsNotifications: {
+    foregroundBehavior: {
+      title: "Notificaciones en la app",
+      footer: "Controla las notificaciones mientras usas la app. Las notificaciones de la sesión que estás viendo siempre se silencian.",
+      full: "Completas",
+      fullDescription: "Mostrar banner y reproducir sonido",
+      silent: "Silenciosas",
+      silentDescription: "Mostrar banner sin sonido",
+      off: "Desactivadas",
+      offDescription: "Solo insignia, sin banner",
+    },
   },
 
   settingsSession: {
@@ -2057,6 +2090,12 @@ export const es: TranslationStructure = {
       `Continuar con ${provider}`,
     linkOrRestoreAccount: "Vincular o restaurar cuenta",
     loginWithMobileApp: "Iniciar sesión con aplicación móvil",
+    serverUnavailableTitle: "No se puede conectar al servidor",
+    serverUnavailableBody: ({ serverUrl }: { serverUrl: string }) =>
+      `No podemos conectarnos a ${serverUrl}. Reintenta o cambia el servidor para continuar.`,
+    serverIncompatibleTitle: "Servidor no compatible",
+    serverIncompatibleBody: ({ serverUrl }: { serverUrl: string }) =>
+      `El servidor en ${serverUrl} devolvió una respuesta inesperada. Actualiza el servidor o cambia de servidor para continuar.`,
   },
 
   review: {
@@ -2073,7 +2112,7 @@ export const es: TranslationStructure = {
       `${label} copiado al portapapeles`,
   },
 
-  machine: {
+	  machine: {
     offlineUnableToSpawn:
       "El lanzador está deshabilitado mientras la máquina está desconectada",
     offlineHelp:
@@ -2091,13 +2130,22 @@ export const es: TranslationStructure = {
     renameTitle: "Renombrar máquina",
     renameDescription:
       "Dale a esta máquina un nombre personalizado. Déjalo vacío para usar el hostname predeterminado.",
-    renamePlaceholder: "Ingresa el nombre de la máquina",
-    renamedSuccess: "Máquina renombrada correctamente",
-    renameFailed: "No se pudo renombrar la máquina",
-    lastKnownPid: "Último PID conocido",
-    lastKnownHttpPort: "Último puerto HTTP conocido",
-    startedAt: "Iniciado en",
-    cliVersion: "Versión del CLI",
+	    renamePlaceholder: "Ingresa el nombre de la máquina",
+	    renamedSuccess: "Máquina renombrada correctamente",
+	    renameFailed: "No se pudo renombrar la máquina",
+	    actions: {
+	      removeMachine: "Remove Machine",
+	      removeMachineSubtitle:
+	        "Revokes this machine and removes it from your account.",
+	      removeMachineConfirmBody:
+	        "This will revoke access from this machine (including access keys and automation assignments). You can reconnect later by signing in again from the CLI.",
+	      removeMachineAlreadyRemoved:
+	        "This machine has already been removed from your account.",
+	    },
+	    lastKnownPid: "Último PID conocido",
+	    lastKnownHttpPort: "Último puerto HTTP conocido",
+	    startedAt: "Iniciado en",
+	    cliVersion: "Versión del CLI",
     daemonStateVersion: "Versión del estado del daemon",
     activeSessions: ({ count }: { count: number }) =>
       `Sesiones activas (${count})`,
@@ -2590,6 +2638,7 @@ export const es: TranslationStructure = {
       kimiSubtitleExperimental: "CLI de Kimi (experimental)",
       kiloSubtitleExperimental: "CLI de Kilo (experimental)",
       piSubtitleExperimental: "CLI de Pi (experimental)",
+      copilotSubtitleExperimental: "GitHub Copilot CLI (experimental)",
     },
     tmux: {
       title: "Tmux",

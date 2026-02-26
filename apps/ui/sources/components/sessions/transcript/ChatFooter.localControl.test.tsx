@@ -13,6 +13,8 @@ vi.mock('react-native', () => ({
     View: 'View',
     Text: 'Text',
     Pressable: 'Pressable',
+    Platform: { OS: 'web', select: (options: any) => options?.web ?? options?.default ?? options?.ios ?? null },
+    AppState: { addEventListener: () => ({ remove: () => {} }) },
 }));
 
 vi.mock('@expo/vector-icons', () => ({
@@ -23,10 +25,14 @@ vi.mock('react-native-unistyles', () => ({
     useUnistyles: () => ({
         theme: {
             colors: {
+                surface: '#fff',
+                divider: '#ddd',
+                shadow: { color: '#000', opacity: 0.2 },
                 box: { warning: { background: '#fff3cd', text: '#856404' } },
             },
         },
     }),
+    StyleSheet: { create: (input: any) => (typeof input === 'function' ? input({ colors: { shadow: { color: '#000', opacity: 0.2 } } }) : input) },
 }));
 
 vi.mock('@/constants/Typography', () => ({
@@ -59,6 +65,14 @@ describe('ChatFooter (local control)', () => {
             controlledByUser: true,
             onRequestSwitchToRemote: vi.fn(),
         });
+
+        // Root container should allow full-width children so long notices wrap instead of overflowing.
+        const views = tree.root.findAllByType('View');
+        expect(views[0]?.props?.style?.alignItems).toBe('stretch');
+
+        const warningViews = views.filter((v) => v.props?.style?.backgroundColor === '#fff3cd');
+        expect(warningViews.length).toBe(1);
+        expect(warningViews[0].props.style.flexWrap).toBe('wrap');
 
         const pressables = tree.root.findAllByType('Pressable');
         expect(pressables.length).toBeGreaterThan(0);

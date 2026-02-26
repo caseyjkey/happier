@@ -122,6 +122,7 @@ Use these as canonical top-level lanes in this repository:
 - `yarn test:integration` (orchestration-heavy app integration lane)
 - `yarn test:e2e:core:fast` (default local core e2e loop)
 - `yarn test:e2e:core:slow` (long orchestration core e2e)
+- `yarn test:e2e:ui` (UI/browser e2e via Playwright; exercises real UI + server + CLI/daemon flows)
 - `yarn test:providers` (provider contracts; opt-in/flag-driven)
 - `yarn test:db-contract:docker` (server db contract via docker)
 
@@ -129,7 +130,17 @@ Naming and placement rules:
 - App integration tests: `*.integration.test.*`, `*.integration.spec.*`, `*.real.integration.test.*`
 - Core e2e slow tests: `packages/tests/suites/core-e2e/**/*.slow.e2e.test.ts`
 - Core e2e fast tests: other `packages/tests/suites/core-e2e/**/*.test.ts`
+- UI Playwright e2e: `packages/tests/suites/ui-e2e/**/*.spec.ts`
 - Provider/stress suites remain under `packages/tests/suites/providers` and `packages/tests/suites/stress`
+
+UI e2e authoring rules (Playwright + Expo web):
+- Prefer stable selectors via React Native `testID` (queried in Playwright with `getByTestId(...)`); avoid selecting by visible copy.
+- Treat `testID`s used by UI e2e as an API surface: avoid renames/removals unless you update the corresponding spec in the same PR.
+- When adding `testID`s to shared RN components, ensure the web implementation forwards them to the DOM (typically `data-testid`) so Playwright can reliably locate elements.
+- Keep UI e2e scenarios high-signal (onboarding, auth/terminal connect, session creation) and avoid duplicating core CLI-only e2e intent.
+- If you change a flow that has a UI e2e, update the spec in `packages/tests/suites/ui-e2e/` in the same PR.
+- UI e2e artifacts (screenshots/videos/diagnostics) are written under `packages/tests/.project/logs/e2e/ui-playwright/`.
+- UI e2e runtime process logs (server/ui-web/daemon) are written under `.project/logs/e2e/*ui-e2e*/`.
 
 When introducing or moving a lane/pattern, update all three in the same change:
 - package-level test config/scripts
@@ -289,6 +300,10 @@ This repo has a single canonical feature gating system. New code must use it ins
 - Resolve feature decisions via `apps/ui/sources/sync/domains/features/featureDecisionRuntime.ts`.
 - When you must read server bits directly (rare), use `readServerEnabledBit(snapshot.features, featureId) === true`.
 - Do not treat missing/undefined as enabled. Prefer decisions (`FeatureDecision.state`) over raw booleans.
+- UI design tokens:
+  - Colors must come from `apps/ui/sources/theme.ts` via Unistyles `theme.colors.*` (avoid hardcoded hex in UI code).
+  - Text must be rendered via `apps/ui/sources/components/ui/text/Text.tsx` so the user-selected in-app font size scales correctly (and stacks with OS Dynamic Type).
+  - All user-visible strings (including accessibility labels/placeholders) must use `t(...)` and be added to all locales under `apps/ui/sources/text/translations/`.
 
 ### Voice (Happier Voice) special note
 - `voice.happierVoice` is a first-class SERVER feature gate and must be explicitly provided by the server.
@@ -300,6 +315,45 @@ This repo has a single canonical feature gating system. New code must use it ins
   - `something.feat.connectedServices.quotas.slow.e2e.test.ts`
 - Vitest automatically excludes denied feature tests using `scripts/testing/featureTestGating.ts` (dependency closure included).
 - Use `HAPPIER_TEST_FEATURES_DENY` (in addition to `HAPPIER_BUILD_FEATURES_DENY`) when you need to disable a feature’s tests in CI without changing the embedded policy.
+
+## Encryption storage modes (E2EE vs plaintext storage)
+
+This repo supports both encrypted-at-rest (E2EE-style) and plaintext-at-rest session storage. Treat this as a **storage-mode** choice; it is **not** the same thing as transport security (TLS) or authentication (key-challenge login still exists).
+
+### Concepts (authoritative contracts)
+- **Server storage policy**: `required_e2ee | optional | plaintext_only` (server config; surfaced via `/v1/features`).
+- **Account encryption mode**: `e2ee | plain` (affects *new* sessions by default).
+- **Session encryption mode**: `e2ee | plain` (fixed at session creation; avoids mixed-mode transcripts).
+- **Message content envelope** (server storage + API contract):
+  - `{ t: 'encrypted', c: string }` (ciphertext base64)
+  - `{ t: 'plain', v: unknown }` (raw transcript record)
+- Pending queue v2 uses the same envelope (`content`) alongside the legacy `ciphertext` shape.
+
+### Implementation rules (do not regress)
+- Always enforce **mode/content-kind compatibility** at write choke points (HTTP + sockets + pending):
+  - `e2ee` session ⇒ accept encrypted content only
+  - `plain` session ⇒ accept plain content only
+- Sharing:
+  - For `plain` sessions: sharing must work without `encryptedDataKey` (server-managed access).
+  - For `e2ee` sessions: sharing/public-share must require a valid `encryptedDataKey` envelope.
+- Do not add client-side “guessing” (e.g. assuming encrypted). Parse the envelope and branch behavior explicitly.
+- All gating must use the canonical feature system:
+  - feature ids: `encryption.plaintextStorage`, `encryption.accountOptOut`
+  - do not gate client behavior on raw env vars or `capabilities` fields.
+
+### Core E2E expectations (keep fast lane small)
+Do **not** duplicate the entire core-e2e suite across both modes. Instead:
+- Keep the existing suite exercising default encrypted behavior.
+- Add **targeted** plaintext-specific E2E tests for each mode-sensitive workflow you touch.
+- Add **targeted** encrypted regressions when contracts change (e.g. “must require encryptedDataKey in e2ee”).
+
+Plaintext storage E2E tests live under `packages/tests/suites/core-e2e/` and are feature-gated via filename markers:
+- `encryption.plaintextStorage.*.feat.encryption.plaintextStorage.*.e2e.test.ts`
+- Sharing plaintext coverage additionally includes `.feat.sharing.public.`, `.feat.sharing.session.`, `.feat.sharing.pendingQueueV2.`, etc.
+
+Testkit notes:
+- Social friends setup helpers: `packages/tests/src/testkit/socialFriends.ts`
+- Pending queue v2 testkit currently models encrypted-only rows; plaintext pending E2E should use direct `fetchJson` unless/until the helper is generalized.
 
 ## UI App Structure Rules (Happier UI)
 
@@ -641,3 +695,19 @@ CRITICAL: Keep TypeScript strict everywhere
 
 CRITICAL: Enforce file size and responsibility boundaries
 If a file is large or multi-purpose, split it by domain/responsibility instead of expanding a monolith.
+
+## Encryption Opt-Out / Plaintext Session Storage (2026-02)
+
+Sessions can be stored in two modes, controlled by `Session.encryptionMode`:
+- `e2ee`: message/pending content is `{ t: 'encrypted', c: <base64> }` and must be decrypted client-side.
+- `plain`: message/pending content is `{ t: 'plain', v: <RawRecord> }` and must *not* be decrypted client-side.
+
+Server policy is advertised in `/v1/features`:
+- gate: `features.encryption.plaintextStorage.enabled` / `features.encryption.accountOptOut.enabled`
+- details: `capabilities.encryption.storagePolicy` (`required_e2ee | optional | plaintext_only`)
+
+Implementation rule of thumb:
+- Never assume `content.t === 'encrypted'`; always branch on the envelope.
+- In `plain` sessions, bypass encrypt/decrypt for `metadata`, `agentState`, messages, and pending rows.
+
+Core e2e coverage lives under `packages/tests/suites/core-e2e/` and includes plaintext roundtrip scenarios (including public share + pending queue v2).

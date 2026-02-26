@@ -133,6 +133,16 @@ function parsePreconfiguredServersFromEnv(): PreconfiguredServer[] {
         append(singleUrl, '', isStackContext() ? 'stack-env' : 'url');
     }
 
+    // On web with no explicitly configured server, fall back to same-origin so that
+    // self-hosted deployments (e.g. https://happier.example.com) get a server profile
+    // without needing EXPO_PUBLIC_HAPPY_SERVER_URL set at build time.
+    if (entries.length === 0) {
+        const origin = getWebSameOriginServerUrl();
+        if (origin) {
+            append(origin, '', 'url');
+        }
+    }
+
     return entries;
 }
 
@@ -298,6 +308,12 @@ function getWebSameOriginServerUrl(): string | null {
     try {
         const parsed = new URL(origin);
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+        // Official hosted web app (app.happier.dev) is a static SPA; the API lives on api.happier.dev.
+        // When builds are missing EXPO_PUBLIC_HAPPY_SERVER_URL, this prevents the default server
+        // from incorrectly pointing at the web host.
+        if (parsed.hostname.toLowerCase() === 'app.happier.dev') {
+            return 'https://api.happier.dev';
+        }
         return origin;
     } catch {
         return null;

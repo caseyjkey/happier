@@ -4,64 +4,26 @@ import renderer, { act } from 'react-test-renderer';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
-vi.mock('react-native', () => ({
-    View: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
-        React.createElement('View', props, props.children),
-    Text: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
-        React.createElement('Text', props, props.children),
-    Pressable: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
-        React.createElement('Pressable', props, props.children),
-    ScrollView: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
-        React.createElement('ScrollView', props, props.children),
-    ActivityIndicator: (props: Record<string, unknown>) => React.createElement('ActivityIndicator', props, null),
-    Platform: { OS: 'ios', select: (v: any) => v.ios },
-    useWindowDimensions: () => ({ width: 800, height: 600 }),
-    Dimensions: {
-        get: () => ({ width: 800, height: 600, scale: 1, fontScale: 1 }),
-    },
-}));
-
-vi.mock('react-native-unistyles', () => ({
-    StyleSheet: {
-        create: (styles: any) => {
-            const theme = {
-                colors: {
-                    input: { background: '#fff' },
-                    button: {
-                        primary: { background: '#000', tint: '#fff' },
-                        secondary: { tint: '#000', surface: '#fff' },
-                    },
-                    radio: { active: '#000', inactive: '#ddd' },
-                    text: '#000',
-                    textSecondary: '#666',
-                    divider: '#ddd',
-                    success: '#0a0',
-                    textDestructive: '#a00',
-                    surfacePressed: '#eee',
-                },
-            };
-            return typeof styles === 'function' ? styles(theme) : styles;
+vi.mock('react-native', async () => {
+    const rn = await import('@/dev/reactNativeStub');
+    return {
+        ...rn,
+        View: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
+            React.createElement('View', props, props.children),
+        Text: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
+            React.createElement('Text', props, props.children),
+        Pressable: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
+            React.createElement('Pressable', props, props.children),
+        ScrollView: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
+            React.createElement('ScrollView', props, props.children),
+        ActivityIndicator: (props: Record<string, unknown>) => React.createElement('ActivityIndicator', props, null),
+        Platform: { ...rn.Platform, OS: 'ios', select: (v: any) => v.ios },
+        useWindowDimensions: () => ({ width: 800, height: 600 }),
+        Dimensions: {
+            get: () => ({ width: 800, height: 600, scale: 1, fontScale: 1 }),
         },
-    },
-    useUnistyles: () => ({
-        theme: {
-            colors: {
-                input: { background: '#fff' },
-                button: {
-                    primary: { background: '#000', tint: '#fff' },
-                    secondary: { tint: '#000', surface: '#fff' },
-                },
-                radio: { active: '#000', inactive: '#ddd' },
-                text: '#000',
-                textSecondary: '#666',
-                divider: '#ddd',
-                success: '#0a0',
-                textDestructive: '#a00',
-                surfacePressed: '#eee',
-            },
-        },
-    }),
-}));
+    };
+});
 
 vi.mock('@expo/vector-icons', () => ({
     Ionicons: (props: Record<string, unknown>) => React.createElement('Ionicons', props, null),
@@ -179,6 +141,7 @@ vi.mock('@/components/ui/scroll/useScrollEdgeFades', () => ({
         onViewportLayout: () => {},
         onContentSizeChange: () => {},
         onScroll: () => {},
+        onMomentumScrollEnd: () => {},
     }),
 }));
 

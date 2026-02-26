@@ -9,6 +9,9 @@ if [[ -n "${HAPPIER_SELF_HOST_MODE:-}" ]]; then
 fi
 WITH_CLI="${HAPPIER_WITH_CLI:-1}"
 NONINTERACTIVE="${HAPPIER_NONINTERACTIVE:-0}"
+ACTION="${HAPPIER_INSTALLER_ACTION:-install}" # install|reinstall|version|check|uninstall|restart
+DEBUG_MODE="${HAPPIER_INSTALLER_DEBUG:-0}"
+PURGE_DATA="${HAPPIER_SELF_HOST_PURGE_DATA:-0}"
 HAPPIER_HOME="${HAPPIER_HOME:-${HOME}/.happier}"
 STACK_INSTALL_DIR="${HAPPIER_STACK_INSTALL_ROOT:-}"
 STACK_BIN_DIR="${HAPPIER_STACK_BIN_DIR:-}"
@@ -21,6 +24,187 @@ EOF
 MINISIGN_PUBKEY="${HAPPIER_MINISIGN_PUBKEY:-${DEFAULT_MINISIGN_PUBKEY}}"
 MINISIGN_PUBKEY_URL="${HAPPIER_MINISIGN_PUBKEY_URL:-https://happier.dev/happier-release.pub}"
 MINISIGN_BIN="minisign"
+
+INSTALLER_COLOR_MODE="${HAPPIER_INSTALLER_COLOR:-auto}" # auto|always|never
+
+supports_color() {
+  if [[ "${INSTALLER_COLOR_MODE}" == "never" ]]; then
+    return 1
+  fi
+  if [[ -n "${NO_COLOR:-}" ]]; then
+    return 1
+  fi
+  if [[ "${INSTALLER_COLOR_MODE}" == "always" ]]; then
+    return 0
+  fi
+  [[ -t 1 ]] && [[ "${TERM:-}" != "dumb" ]]
+}
+
+if supports_color; then
+  COLOR_RESET=$'\033[0m'
+  COLOR_BOLD=$'\033[1m'
+  COLOR_GREEN=$'\033[32m'
+  COLOR_YELLOW=$'\033[33m'
+  COLOR_CYAN=$'\033[36m'
+else
+  COLOR_RESET=""
+  COLOR_BOLD=""
+  COLOR_GREEN=""
+  COLOR_YELLOW=""
+  COLOR_CYAN=""
+fi
+
+say() {
+  printf '%s\n' "$*"
+}
+
+info() {
+  say "${COLOR_CYAN}$*${COLOR_RESET}"
+}
+
+success() {
+  say "${COLOR_GREEN}$*${COLOR_RESET}"
+}
+
+warn() {
+  say "${COLOR_YELLOW}$*${COLOR_RESET}"
+}
+
+json_lookup_asset_url() {
+  local json="$1"
+  local name_regex="$2"
+  # GitHub API JSON is typically pretty-printed (newlines + spaces). Avoid "minifying" into one
+  # giant line (which can overflow awk line-length limits on some platforms) and instead parse
+  # line-by-line within the assets array. We intentionally return the *last* match to support
+  # rolling tags that may contain multiple versions: newest assets are appended later in the JSON.
+  printf '%s' "$json" | awk -v re="$name_regex" '
+    BEGIN {
+      in_assets = 0
+      name = ""
+      last = ""
+    }
+    {
+      raw = $0
+      if (in_assets == 0) {
+        if (raw ~ /"assets"[[:space:]]*:[[:space:]]*\[/) {
+          in_assets = 1
+        }
+        next
+      }
+
+      # End of the assets array. The GitHub API pretty-prints `],` on its own line.
+      if (raw ~ /^[[:space:]]*][[:space:]]*,?[[:space:]]*$/) {
+        in_assets = 0
+        next
+      }
+
+      if (raw ~ /"name"[[:space:]]*:[[:space:]]*"/) {
+        v = raw
+        sub(/^.*"name"[[:space:]]*:[[:space:]]*"/, "", v)
+        q = index(v, "\"")
+        if (q > 0) {
+          name = substr(v, 1, q - 1)
+        }
+      }
+
+      if (raw ~ /"browser_download_url"[[:space:]]*:[[:space:]]*"/) {
+        v = raw
+        sub(/^.*"browser_download_url"[[:space:]]*:[[:space:]]*"/, "", v)
+        q = index(v, "\"")
+        url = ""
+        if (q > 0) {
+          url = substr(v, 1, q - 1)
+        }
+        if (name ~ re && url != "") {
+          last = url
+        }
+      }
+    }
+    END {
+      if (last != "") {
+        print last
+      }
+    }
+  '
+}
+
+action_version() {
+  if [[ "${CHANNEL}" != "stable" && "${CHANNEL}" != "preview" ]]; then
+    echo "Invalid HAPPIER_CHANNEL='${CHANNEL}'. Expected stable or preview." >&2
+    return 1
+  fi
+
+  local tag="stack-stable"
+  if [[ "${CHANNEL}" == "preview" ]]; then
+    tag="stack-preview"
+  fi
+
+  local uname_os=""
+  uname_os="$(uname -s)"
+  local os=""
+  case "${uname_os}" in
+    Linux) os="linux" ;;
+    Darwin) os="darwin" ;;
+    *)
+      echo "Unsupported platform: ${uname_os}" >&2
+      return 1
+      ;;
+  esac
+
+  local arch_raw=""
+  arch_raw="$(uname -m)"
+  local arch=""
+  case "${arch_raw}" in
+    x86_64|amd64) arch="x64" ;;
+    arm64|aarch64) arch="arm64" ;;
+    *)
+      echo "Unsupported architecture: ${arch_raw}" >&2
+      return 1
+      ;;
+  esac
+
+  local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${tag}"
+  info "Fetching ${tag} release metadata..."
+  local release_json=""
+  if ! release_json="$(curl -fsSL "${api_url}")"; then
+    echo "Failed to fetch release metadata for Happier Stack." >&2
+    return 1
+  fi
+
+  local asset_regex="^hstack-v.*-${os}-${arch}[.]tar[.]gz$"
+  local asset_url=""
+  asset_url="$(json_lookup_asset_url "${release_json}" "${asset_regex}")"
+  if [[ -z "${asset_url}" ]]; then
+    echo "Unable to locate release assets for ${os}-${arch} on tag ${tag}." >&2
+    return 1
+  fi
+  local asset_name=""
+  asset_name="$(basename "${asset_url}")"
+  local version=""
+  version="${asset_name#hstack-v}"
+  version="${version%-${os}-${arch}.tar.gz}"
+  if [[ -z "${version}" || "${version}" == "${asset_name}" ]]; then
+    echo "Failed to infer release version from asset name: ${asset_name}" >&2
+    return 1
+  fi
+
+  say "Happier Stack installer version check"
+  say "- channel: ${CHANNEL}"
+  say "- mode: ${MODE}"
+  say "- platform: ${os}-${arch}"
+  say "- version: ${version}"
+  return 0
+}
+
+tar_extract_gz() {
+  local archive_path="$1"
+  local dest_dir="$2"
+  mkdir -p "${dest_dir}"
+  # GNU tar on Linux emits noisy, non-actionable warnings when extracting archives created by bsdtar/libarchive:
+  #   "Ignoring unknown extended header keyword 'LIBARCHIVE.xattr...'"
+  # Filter those while preserving real errors.
+  tar -xzf "${archive_path}" -C "${dest_dir}" 2> >(grep -v -E "^tar: Ignoring unknown extended header keyword" >&2 || true)
+}
 
 usage() {
   cat <<'EOF'
@@ -46,6 +230,14 @@ Options:
   --channel <stable|preview>
   --stable
   --preview
+  --check
+  --version
+  --reinstall
+  --restart
+  --uninstall [--purge-data]
+  --reset
+  --purge-data
+  --debug
   -h, --help
 EOF
 }
@@ -117,6 +309,39 @@ while [[ $# -gt 0 ]]; do
       CHANNEL="preview"
       shift 1
       ;;
+    --check)
+      ACTION="check"
+      shift 1
+      ;;
+    --version)
+      ACTION="version"
+      shift 1
+      ;;
+    --reinstall)
+      ACTION="install"
+      shift 1
+      ;;
+    --restart)
+      ACTION="restart"
+      shift 1
+      ;;
+    --uninstall)
+      ACTION="uninstall"
+      shift 1
+      ;;
+    --reset)
+      ACTION="uninstall"
+      PURGE_DATA="1"
+      shift 1
+      ;;
+    --purge-data)
+      PURGE_DATA="1"
+      shift 1
+      ;;
+    --debug)
+      DEBUG_MODE="1"
+      shift 1
+      ;;
     --)
       shift 1
       break
@@ -129,6 +354,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "${DEBUG_MODE}" == "1" ]]; then
+  set -x
+fi
+
 if [[ "${MODE}" != "user" && "${MODE}" != "system" ]]; then
   echo "Invalid mode: ${MODE}. Expected user or system." >&2
   exit 1
@@ -137,6 +366,11 @@ fi
 if [[ "${CHANNEL}" != "stable" && "${CHANNEL}" != "preview" ]]; then
   echo "Invalid HAPPIER_CHANNEL='${CHANNEL}'. Expected stable or preview." >&2
   exit 1
+fi
+
+if [[ "${ACTION}" == "version" ]]; then
+  action_version
+  exit $?
 fi
 
 UNAME="$(uname -s)"
@@ -182,11 +416,6 @@ if [[ "${MODE}" == "system" && "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
-if [[ "${OS}" == "linux" ]] && ! command -v systemctl >/dev/null 2>&1; then
-  echo "systemctl is required for self-host installation on Linux." >&2
-  exit 1
-fi
-
 ARCH="$(uname -m)"
 case "${ARCH}" in
   x86_64|amd64) ARCH="x64" ;;
@@ -202,51 +431,105 @@ if [[ "${CHANNEL}" == "preview" ]]; then
   TAG="stack-preview"
 fi
 
-json_lookup_asset_url() {
-  local json="$1"
-  local name_regex="$2"
-  # GitHub API JSON is typically pretty-printed (newlines + spaces). Minify and then parse using a
-  # tiny jq-free state machine that pairs `"name":"..."` with the next `"browser_download_url":"..."`.
-  # We intentionally return the *last* match to support rolling tags that may contain multiple
-  # versions: newest assets are appended later in the release JSON.
-  printf '%s' "$json" | tr -d '[:space:]' | awk -v re="$name_regex" '
-    {
-      s = $0
-      assets_key = "\"assets\":["
-      a = index(s, assets_key)
-      if (a > 0) {
-        s = substr(s, a + length(assets_key))
-      }
-      name_key = "\"name\":\""
-      url_key = "\"browser_download_url\":\""
-      last = ""
-      while (1) {
-        p = index(s, name_key)
-        if (p == 0) break
-        s = substr(s, p + length(name_key))
-        q = index(s, "\"")
-        if (q == 0) break
-        name = substr(s, 1, q - 1)
-        s = substr(s, q + 1)
-
-        u = index(s, url_key)
-        if (u == 0) continue
-        s = substr(s, u + length(url_key))
-        v = index(s, "\"")
-        if (v == 0) break
-        url = substr(s, 1, v - 1)
-        s = substr(s, v + 1)
-
-        if (name ~ re && url != "") {
-          last = url
-        }
-      }
-      if (last != "") {
-        print last
-      }
-    }
-  '
+resolve_hstack_path() {
+  if command -v hstack >/dev/null 2>&1; then
+    command -v hstack
+    return 0
+  fi
+  if [[ -x "${STACK_INSTALL_DIR}/bin/hstack" ]]; then
+    echo "${STACK_INSTALL_DIR}/bin/hstack"
+    return 0
+  fi
+  if [[ -x "${STACK_BIN_DIR}/hstack" ]]; then
+    echo "${STACK_BIN_DIR}/hstack"
+    return 0
+  fi
+  return 1
 }
+
+print_self_host_log_guidance() {
+  if [[ "${MODE}" == "system" ]]; then
+    SELF_HOST_LOG_DIR="${HAPPIER_SELF_HOST_LOG_DIR:-/var/log/happier}"
+    SELF_HOST_SERVICE_NAME="${HAPPIER_SELF_HOST_SERVICE_NAME:-happier-server}"
+  else
+    SELF_HOST_LOG_DIR="${HAPPIER_SELF_HOST_LOG_DIR:-${HAPPIER_HOME}/self-host/logs}"
+    SELF_HOST_SERVICE_NAME="${HAPPIER_SELF_HOST_SERVICE_NAME:-happier-server}"
+  fi
+  say "  - ${SELF_HOST_LOG_DIR}/server.err.log"
+  say "  - ${SELF_HOST_LOG_DIR}/server.out.log"
+  if [[ "${OS}" == "linux" ]]; then
+    if [[ "${MODE}" == "system" ]]; then
+      say "  - sudo journalctl -u ${SELF_HOST_SERVICE_NAME} -e --no-pager"
+    else
+      say "  - journalctl --user -u ${SELF_HOST_SERVICE_NAME} -e --no-pager"
+    fi
+  fi
+}
+
+action_check() {
+  local hstack=""
+  hstack="$(resolve_hstack_path 2>/dev/null || true)"
+  if [[ -z "${hstack}" ]]; then
+    warn "hstack is not installed."
+    warn "Run: curl -fsSL https://happier.dev/self-host-preview | bash"
+    return 1
+  fi
+  info "Checking Happier Self-Host..."
+  "${hstack}" self-host status --mode="${MODE}" --channel="${CHANNEL}" || true
+  "${hstack}" self-host doctor --mode="${MODE}" --channel="${CHANNEL}"
+  return $?
+}
+
+action_uninstall() {
+  local hstack=""
+  hstack="$(resolve_hstack_path 2>/dev/null || true)"
+  if [[ -z "${hstack}" ]]; then
+    warn "hstack is not installed."
+    return 1
+  fi
+  local args=(self-host uninstall --yes --non-interactive --channel="${CHANNEL}" --mode="${MODE}")
+  if [[ "${PURGE_DATA}" == "1" ]]; then
+    args+=(--purge-data)
+  fi
+  "${hstack}" "${args[@]}"
+  return $?
+}
+
+action_restart() {
+  local service="${HAPPIER_SELF_HOST_SERVICE_NAME:-happier-server}"
+  if [[ "${OS}" == "linux" ]] && command -v systemctl >/dev/null 2>&1; then
+    info "Restarting ${service}..."
+    if [[ "${MODE}" == "system" ]]; then
+      systemctl restart "${service}.service"
+    else
+      systemctl --user restart "${service}.service"
+    fi
+  fi
+  local hstack=""
+  hstack="$(resolve_hstack_path 2>/dev/null || true)"
+  if [[ -n "${hstack}" ]]; then
+    "${hstack}" self-host status --mode="${MODE}" --channel="${CHANNEL}" || true
+  fi
+  return 0
+}
+
+if [[ "${ACTION}" == "check" ]]; then
+  action_check
+  exit $?
+fi
+if [[ "${ACTION}" == "uninstall" ]]; then
+  action_uninstall
+  exit $?
+fi
+if [[ "${ACTION}" == "restart" ]]; then
+  action_restart
+  exit $?
+fi
+
+if [[ "${OS}" == "linux" ]] && ! command -v systemctl >/dev/null 2>&1; then
+  echo "systemctl is required for self-host installation on Linux." >&2
+  exit 1
+fi
 
 sha256_file() {
   local path="$1"
@@ -296,7 +579,7 @@ ensure_minisign() {
   local extract_dir="${TMP_DIR}/minisign-extract"
   mkdir -p "${extract_dir}"
   if [[ "${asset}" == *.tar.gz ]]; then
-    tar -xzf "${archive_path}" -C "${extract_dir}"
+    tar_extract_gz "${archive_path}" "${extract_dir}"
   else
     if command -v unzip >/dev/null 2>&1; then
       unzip -q "${archive_path}" -d "${extract_dir}"
@@ -345,7 +628,7 @@ write_minisign_public_key() {
 }
 
 API_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${TAG}"
-echo "Fetching ${TAG} release metadata..."
+info "Fetching ${TAG} release metadata..."
 if ! RELEASE_JSON="$(curl -fsSL "${API_URL}")"; then
   if [[ "${CHANNEL}" == "stable" ]]; then
     echo "No stable releases found for Happier Stack." >&2
@@ -384,6 +667,9 @@ fi
 
 TMP_DIR="$(mktemp -d)"
 cleanup() {
+  if [[ "${DEBUG_MODE}" == "1" ]]; then
+    return
+  fi
   rm -rf "${TMP_DIR}"
 }
 trap cleanup EXIT
@@ -393,7 +679,7 @@ CHECKSUMS_PATH="${TMP_DIR}/checksums.txt"
 curl -fsSL "${ASSET_URL}" -o "${ARCHIVE_PATH}"
 curl -fsSL "${CHECKSUMS_URL}" -o "${CHECKSUMS_PATH}"
 
-EXPECTED_SHA="$(grep -E "  $(basename "${ASSET_URL}")$" "${CHECKSUMS_PATH}" | awk '{print $1}' | head -n 1)"
+EXPECTED_SHA="$(grep -E "  $(basename "${ASSET_URL}")$" "${CHECKSUMS_PATH}" | awk '{print $1}' | head -n 1 || true)"
 if [[ -z "${EXPECTED_SHA}" ]]; then
   echo "Failed to resolve checksum for $(basename "${ASSET_URL}")" >&2
   exit 1
@@ -403,7 +689,7 @@ if [[ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]]; then
   echo "Checksum verification failed." >&2
   exit 1
 fi
-echo "Checksum verified."
+success "Checksum verified."
 
 if ! ensure_minisign; then
   echo "minisign is required for installer signature verification." >&2
@@ -416,11 +702,11 @@ SIG_PATH="${TMP_DIR}/checksums.txt.minisig"
 write_minisign_public_key "${PUBKEY_PATH}"
 curl -fsSL "${SIG_URL}" -o "${SIG_PATH}"
 "${MINISIGN_BIN}" -Vm "${CHECKSUMS_PATH}" -x "${SIG_PATH}" -p "${PUBKEY_PATH}" >/dev/null
-echo "Signature verified."
+success "Signature verified."
 
 EXTRACT_DIR="${TMP_DIR}/extract"
 mkdir -p "${EXTRACT_DIR}"
-tar -xzf "${ARCHIVE_PATH}" -C "${EXTRACT_DIR}"
+tar_extract_gz "${ARCHIVE_PATH}" "${EXTRACT_DIR}"
 BINARY_PATH="$(find "${EXTRACT_DIR}" -type f -name hstack -perm -u+x | head -n 1 || true)"
 if [[ -z "${BINARY_PATH}" ]]; then
   echo "Failed to locate extracted hstack binary." >&2
@@ -432,7 +718,7 @@ cp "${BINARY_PATH}" "${STACK_INSTALL_DIR}/bin/hstack"
 chmod +x "${STACK_INSTALL_DIR}/bin/hstack"
 ln -sf "${STACK_INSTALL_DIR}/bin/hstack" "${STACK_BIN_DIR}/hstack"
 
-echo "Installed hstack to ${STACK_INSTALL_DIR}/bin/hstack"
+success "Installed hstack to ${STACK_INSTALL_DIR}/bin/hstack"
 
 SELF_HOST_ARGS=(self-host install --non-interactive --channel="${CHANNEL}" --mode="${MODE}")
 if [[ "${WITH_CLI}" != "1" ]]; then
@@ -442,10 +728,56 @@ fi
 export HAPPIER_NONINTERACTIVE="${NONINTERACTIVE}"
 
 if [[ "${NONINTERACTIVE}" != "1" ]]; then
-  echo "Starting Happier Self-Host guided installation..."
+  info "Starting Happier Self-Host guided installation..."
+  say
+  info "This can take a few minutes. If it looks stuck, check logs:"
+  if [[ "${MODE}" == "system" ]]; then
+    SELF_HOST_LOG_DIR="${HAPPIER_SELF_HOST_LOG_DIR:-/var/log/happier}"
+    SELF_HOST_SERVICE_NAME="${HAPPIER_SELF_HOST_SERVICE_NAME:-happier-server}"
+  else
+    SELF_HOST_LOG_DIR="${HAPPIER_SELF_HOST_LOG_DIR:-${HAPPIER_HOME}/self-host/logs}"
+    SELF_HOST_SERVICE_NAME="${HAPPIER_SELF_HOST_SERVICE_NAME:-happier-server}"
+  fi
+  say "  - ${SELF_HOST_LOG_DIR}/server.err.log"
+  say "  - ${SELF_HOST_LOG_DIR}/server.out.log"
+  if [[ "${OS}" == "linux" ]]; then
+    if [[ "${MODE}" == "system" ]]; then
+      say "  - sudo journalctl -u ${SELF_HOST_SERVICE_NAME} -e --no-pager"
+    else
+      say "  - journalctl --user -u ${SELF_HOST_SERVICE_NAME} -e --no-pager"
+    fi
+  fi
+  say
 fi
-"${STACK_INSTALL_DIR}/bin/hstack" "${SELF_HOST_ARGS[@]}"
+if ! "${STACK_INSTALL_DIR}/bin/hstack" "${SELF_HOST_ARGS[@]}"; then
+  warn
+  warn "[self-host] install failed"
+  say
+  info "Troubleshooting:"
+  say "  ${STACK_BIN_DIR}/hstack self-host status --mode=${MODE} --channel=${CHANNEL}"
+  say "  ${STACK_BIN_DIR}/hstack self-host doctor --mode=${MODE} --channel=${CHANNEL}"
+  say "  ${STACK_BIN_DIR}/hstack self-host config view --mode=${MODE} --channel=${CHANNEL} --json"
+  say
+  info "Logs:"
+  if [[ "${MODE}" == "system" ]]; then
+    SELF_HOST_LOG_DIR="${HAPPIER_SELF_HOST_LOG_DIR:-/var/log/happier}"
+    SELF_HOST_SERVICE_NAME="${HAPPIER_SELF_HOST_SERVICE_NAME:-happier-server}"
+  else
+    SELF_HOST_LOG_DIR="${HAPPIER_SELF_HOST_LOG_DIR:-${HAPPIER_HOME}/self-host/logs}"
+    SELF_HOST_SERVICE_NAME="${HAPPIER_SELF_HOST_SERVICE_NAME:-happier-server}"
+  fi
+  say "  tail -n 200 ${SELF_HOST_LOG_DIR}/server.err.log"
+  say "  tail -n 200 ${SELF_HOST_LOG_DIR}/server.out.log"
+  if [[ "${OS}" == "linux" ]]; then
+    if [[ "${MODE}" == "system" ]]; then
+      say "  sudo journalctl -u ${SELF_HOST_SERVICE_NAME} -e --no-pager"
+    else
+      say "  journalctl --user -u ${SELF_HOST_SERVICE_NAME} -e --no-pager"
+    fi
+  fi
+  exit 1
+fi
 
 echo
-echo "Happier Self-Host installation completed."
-echo "Run: ${STACK_BIN_DIR}/hstack self-host status"
+success "Happier Self-Host installation completed."
+info "Run: ${STACK_BIN_DIR}/hstack self-host status"

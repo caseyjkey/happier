@@ -7,6 +7,31 @@ import { fileURLToPath } from 'node:url';
 
 import { scrubHappierStackEnv, STACK_WRAPPER_PRESERVE_KEYS } from './utils/env/scrub_env.mjs';
 import { applyStackActiveServerScopeEnv } from './utils/auth/stable_scope_id.mjs';
+import { ensureDepsInstalled } from './utils/proc/pm.mjs';
+import { ensureEnvFilePruned, ensureEnvFileUpdated } from './utils/env/env_file.mjs';
+import { parseEnvToObject } from './utils/env/dotenv.mjs';
+import { resolveLocalServerPortForStack } from './utils/server/resolve_stack_server_port.mjs';
+
+function shouldAutoInstallDepsForRepoLocalCommand(cmd) {
+  const c = String(cmd ?? '').trim();
+  if (!c) return false;
+  if (c === 'help' || c === '--help' || c === '-h') return false;
+  if (c === 'where') return false;
+  if (c === 'stop') return false;
+  return true;
+}
+
+async function maybeAutoInstallRepoDeps({ repoRoot, cmd, env, autoInstallOverride = '', preflightRootOverride = '' }) {
+  const autoInstallRaw = String(autoInstallOverride ?? '').trim();
+  const autoInstall = autoInstallRaw ? autoInstallRaw !== '0' : true;
+  if (!autoInstall) return;
+  if (!shouldAutoInstallDepsForRepoLocalCommand(cmd)) return;
+
+  // Test hook: allow validating auto-install behavior without mutating the real repo checkout.
+  const preflightRoot = String(preflightRootOverride ?? '').trim() || repoRoot;
+
+  await ensureDepsInstalled(preflightRoot, 'happier-monorepo', { quiet: false, env });
+}
 
 function usage() {
   return [
@@ -39,6 +64,19 @@ function stringifyEnvFile(env) {
     lines.push(`${key}=${val}`);
   }
   return lines.join('\n') + '\n';
+}
+
+function coercePositiveInt(v) {
+  const n = Number(String(v ?? '').trim());
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+function isPortWithinRange(port, base, range) {
+  const p = coercePositiveInt(port);
+  const b = coercePositiveInt(base);
+  const r = coercePositiveInt(range);
+  if (!p || !b || !r) return false;
+  return p >= b && p < b + r;
 }
 
 function sanitizeStackNameToken(s) {
@@ -87,6 +125,16 @@ function readTextFile(path) {
   }
 }
 
+function readEnvFileObject(path) {
+  const raw = readTextFile(path);
+  if (!raw.trim()) return {};
+  try {
+    return parseEnvToObject(raw);
+  } catch {
+    return {};
+  }
+}
+
 function writeTextFileBestEffort(path, contents) {
   try {
     if (!path) return;
@@ -96,21 +144,21 @@ function writeTextFileBestEffort(path, contents) {
   }
 }
 
-function writeEnvFileBestEffort(path, env) {
-  try {
-    if (!path) return;
-    const next = stringifyEnvFile(env);
-    let prev = '';
-    try {
-      prev = existsSync(path) ? readFileSync(path, 'utf-8').toString() : '';
-    } catch {
-      prev = '';
-    }
-    if (prev !== next) {
-      writeFileSync(path, next, { encoding: 'utf-8' });
-    }
-  } catch {
-    // ignore
+async function syncRepoLocalEnvFile({ envPath, managedEnv = {}, pruneKeys = [] } = {}) {
+  const target = String(envPath ?? '').trim();
+  if (!target) return;
+
+  const updates = Object.entries(managedEnv ?? {})
+    .map(([k, v]) => ({ key: String(k ?? '').trim(), value: v == null ? '' : String(v) }))
+    .filter((u) => u.key && u.value.trim() !== '');
+
+  // Preserve user keys: only upsert a small managed keyset, and prune specific stale managed keys.
+  if (updates.length) {
+    await ensureEnvFileUpdated({ envPath: target, updates });
+  }
+  const removeKeys = Array.from(new Set((pruneKeys ?? []).map((k) => String(k ?? '').trim()).filter(Boolean)));
+  if (removeKeys.length) {
+    await ensureEnvFilePruned({ envPath: target, removeKeys });
   }
 }
 
@@ -186,7 +234,23 @@ function readRuntimeServerPort(runtimeStatePath) {
   }
 }
 
-function main() {
+function readRuntimeExpoPort(runtimeStatePath) {
+  try {
+    if (!runtimeStatePath || !existsSync(runtimeStatePath)) return null;
+    const raw = readFileSync(runtimeStatePath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    const port = Number(parsed?.expo?.port ?? parsed?.expo?.webPort ?? parsed?.expo?.mobilePort);
+    return Number.isFinite(port) && port > 0 ? port : null;
+  } catch {
+    return null;
+  }
+}
+
+async function main() {
+  const autoInstallOverride = String(process.env.HAPPIER_STACK_REPO_LOCAL_AUTO_INSTALL ?? '').trim();
+  const preflightRootOverride = String(process.env.HAPPIER_STACK_REPO_LOCAL_PREFLIGHT_ROOT ?? '').trim();
+  const preflightOnly = String(process.env.HAPPIER_STACK_REPO_LOCAL_PREFLIGHT_ONLY ?? '').trim();
+
   const argvRaw = process.argv.slice(2);
   const firstArg = argvRaw[0];
   const showWrapperHelp =
@@ -236,14 +300,32 @@ function main() {
   const stacklessBaseDir = join(stacksStorageRoot, stacklessName);
   const stacklessRuntimePath = join(stacklessBaseDir, 'stack.runtime.json');
   const runtimeServerPort = readRuntimeServerPort(stacklessRuntimePath);
+  const runtimeExpoPort = readRuntimeExpoPort(stacklessRuntimePath);
   const stacklessEnvPath = join(stacklessBaseDir, 'env');
   const stacklessCliHomeDir = join(stacklessBaseDir, 'cli');
+  const stacklessLogsDir = join(stacklessBaseDir, 'logs');
+  const existingStacklessEnv = readEnvFileObject(stacklessEnvPath);
+  const existingPinnedServerPort = coercePositiveInt(existingStacklessEnv.HAPPIER_STACK_SERVER_PORT);
+  const existingPinnedExpoPort = coercePositiveInt(existingStacklessEnv.HAPPIER_STACK_EXPO_DEV_PORT);
 
   // Convenience:
   // `yarn stop` should stop the repo-local stack without requiring users to know its generated name.
   if (isStop) {
     const forwarded = argv.slice(1);
     argv = ['stack', 'stop', stacklessName, ...forwarded];
+  }
+
+  // Convenience:
+  // `yarn mobile:install` should install a Release iOS build for the repo-local stack without requiring users
+  // to know the generated stack name, and should run the full stack install flow (prebuild, identity, etc).
+  if (subcommand === 'mobile:install') {
+    const forwarded = argv.slice(1);
+    const hasName = forwarded.some((a) => {
+      const s = String(a ?? '').trim();
+      return s === '--name' || s.startsWith('--name=') || s === '--app-name' || s.startsWith('--app-name=');
+    });
+    const defaultNameArg = hasName ? [] : ['--name=Happier (Local)'];
+    argv = ['stack', 'mobile:install', stacklessName, ...defaultNameArg, ...forwarded];
   }
 
   // Force "repo-local" behavior:
@@ -285,6 +367,8 @@ function main() {
           // Make stack-owned processes prove ownership (for stop/cleanup) and enable stack commands like `stack auth`.
           HAPPIER_STACK_ENV_FILE: stacklessEnvPath,
           HAPPIER_STACK_CLI_HOME_DIR: stacklessCliHomeDir,
+          // If set, internal spawns can tee output into stack-scoped log files (server.log/expo.log/ui.log).
+          HAPPIER_STACK_LOG_TEE_DIR: stacklessLogsDir,
           // Stackless isolation: keep ports away from main/default stack ports by default.
           HAPPIER_STACK_SERVER_PORT_BASE: (process.env.HAPPIER_STACK_SERVER_PORT_BASE ?? '52005').toString(),
           HAPPIER_STACK_SERVER_PORT_RANGE: (process.env.HAPPIER_STACK_SERVER_PORT_RANGE ?? '2000').toString(),
@@ -292,7 +376,24 @@ function main() {
           HAPPIER_STACK_EXPO_DEV_PORT_RANGE: (process.env.HAPPIER_STACK_EXPO_DEV_PORT_RANGE ?? '2000').toString(),
           // Make Expo's Metro use stable (stack-scoped) port strategy.
           HAPPIER_STACK_EXPO_DEV_PORT_STRATEGY: (process.env.HAPPIER_STACK_EXPO_DEV_PORT_STRATEGY ?? 'stable').toString(),
-          ...(runtimeServerPort ? { HAPPIER_STACK_SERVER_PORT: String(runtimeServerPort) } : {}),
+          ...(runtimeServerPort &&
+          !existingPinnedServerPort &&
+          isPortWithinRange(
+            runtimeServerPort,
+            process.env.HAPPIER_STACK_SERVER_PORT_BASE ?? '52005',
+            process.env.HAPPIER_STACK_SERVER_PORT_RANGE ?? '2000'
+          )
+            ? { HAPPIER_STACK_SERVER_PORT: String(runtimeServerPort) }
+            : {}),
+          ...(runtimeExpoPort &&
+          !existingPinnedExpoPort &&
+          isPortWithinRange(
+            runtimeExpoPort,
+            process.env.HAPPIER_STACK_EXPO_DEV_PORT_BASE ?? '18081',
+            process.env.HAPPIER_STACK_EXPO_DEV_PORT_RANGE ?? '2000'
+          )
+            ? { HAPPIER_STACK_EXPO_DEV_PORT: String(runtimeExpoPort) }
+            : {}),
         }),
     HAPPIER_STACK_INVOKED_CWD: invokedCwd,
   };
@@ -307,14 +408,54 @@ function main() {
     try {
       mkdirSync(stacklessBaseDir, { recursive: true });
       mkdirSync(stacklessCliHomeDir, { recursive: true });
+      mkdirSync(stacklessLogsDir, { recursive: true });
     } catch {
       // ignore (best-effort)
     }
 
-    // Treat the repo-local stack as managed by the wrapper: keep a minimal env file in sync.
-    // This makes `hstack stack auth <name> ...` and `hstack stack stop <name>` work without requiring manual `stack new`.
-    const serverComponent = (effectiveEnv.HAPPIER_STACK_SERVER_COMPONENT ?? 'happier-server-light').toString().trim() || 'happier-server-light';
-    writeEnvFileBestEffort(stacklessEnvPath, {
+	    const serverComponent = (effectiveEnv.HAPPIER_STACK_SERVER_COMPONENT ?? 'happier-server-light').toString().trim() || 'happier-server-light';
+	    const serverBase = effectiveEnv.HAPPIER_STACK_SERVER_PORT_BASE;
+	    const serverRange = effectiveEnv.HAPPIER_STACK_SERVER_PORT_RANGE;
+	    const expoBase = effectiveEnv.HAPPIER_STACK_EXPO_DEV_PORT_BASE;
+	    const expoRange = effectiveEnv.HAPPIER_STACK_EXPO_DEV_PORT_RANGE;
+
+	    // Persist a stable pinned server port early so repo-local "global-ish" commands like
+	    // `yarn tailscale enable` and `yarn service install` can resolve the correct internal URL
+	    // even before the first `yarn dev/start` run creates stack.runtime.json.
+	    let persistedServerPort = null;
+	    if (!existingPinnedServerPort) {
+	      if (runtimeServerPort && isPortWithinRange(runtimeServerPort, serverBase, serverRange)) {
+	        persistedServerPort = runtimeServerPort;
+	      } else {
+	        persistedServerPort = await resolveLocalServerPortForStack({
+	          env: {
+	            ...effectiveEnv,
+	            HAPPIER_STACK_SERVER_PORT_BASE: (effectiveEnv.HAPPIER_STACK_SERVER_PORT_BASE ?? '52005').toString(),
+	            HAPPIER_STACK_SERVER_PORT_RANGE: (effectiveEnv.HAPPIER_STACK_SERVER_PORT_RANGE ?? '2000').toString(),
+	          },
+	          stackMode: true,
+	          stackName: stacklessName,
+	          runtimeStatePath: stacklessRuntimePath,
+	          defaultPort: 3005,
+	        }).catch(() => null);
+	      }
+	    }
+
+	    // Auto-heal:
+	    // If a stale pinned port exists in the stackless env file but it doesn't match the configured stable range,
+	    // prune it so dev/start can pick a stable high port again.
+	    const pruneKeys = [];
+    if (
+      existingPinnedServerPort &&
+      existingPinnedServerPort < 5000 &&
+      !isPortWithinRange(existingPinnedServerPort, serverBase, serverRange)
+    ) {
+      pruneKeys.push('HAPPIER_STACK_SERVER_PORT');
+    }
+
+    // Treat the repo-local stack as managed by the wrapper: keep a small set of stack-owned keys in sync,
+    // but preserve any user-defined keys they set via `hstack env` / `yarn env`.
+    const managedEnv = {
       HAPPIER_STACK_STACK: stacklessName,
       HAPPIER_STACK_REPO_DIR: repoRoot,
       HAPPIER_STACK_SERVER_COMPONENT: serverComponent,
@@ -322,12 +463,22 @@ function main() {
       HAPPIER_STACK_SERVER_PORT_BASE: effectiveEnv.HAPPIER_STACK_SERVER_PORT_BASE,
       HAPPIER_STACK_SERVER_PORT_RANGE: effectiveEnv.HAPPIER_STACK_SERVER_PORT_RANGE,
       HAPPIER_STACK_EXPO_DEV_PORT_BASE: effectiveEnv.HAPPIER_STACK_EXPO_DEV_PORT_BASE,
-      HAPPIER_STACK_EXPO_DEV_PORT_RANGE: effectiveEnv.HAPPIER_STACK_EXPO_DEV_PORT_RANGE,
-      HAPPIER_STACK_EXPO_DEV_PORT_STRATEGY: effectiveEnv.HAPPIER_STACK_EXPO_DEV_PORT_STRATEGY,
-      ...(runtimeServerPort ? { HAPPIER_STACK_SERVER_PORT: String(runtimeServerPort) } : {}),
-      // Keep the stable active server id explicit so daemons/CLI always scope state/credentials per stack.
-      ...(effectiveEnv.HAPPIER_ACTIVE_SERVER_ID ? { HAPPIER_ACTIVE_SERVER_ID: effectiveEnv.HAPPIER_ACTIVE_SERVER_ID } : {}),
-    });
+	      HAPPIER_STACK_EXPO_DEV_PORT_RANGE: effectiveEnv.HAPPIER_STACK_EXPO_DEV_PORT_RANGE,
+	      HAPPIER_STACK_EXPO_DEV_PORT_STRATEGY: effectiveEnv.HAPPIER_STACK_EXPO_DEV_PORT_STRATEGY,
+	      // Keep the stable active server id explicit so daemons/CLI always scope state/credentials per stack.
+	      ...(effectiveEnv.HAPPIER_ACTIVE_SERVER_ID ? { HAPPIER_ACTIVE_SERVER_ID: effectiveEnv.HAPPIER_ACTIVE_SERVER_ID } : {}),
+	      ...(persistedServerPort &&
+	      !existingPinnedServerPort &&
+	      isPortWithinRange(persistedServerPort, serverBase, serverRange)
+	        ? { HAPPIER_STACK_SERVER_PORT: String(persistedServerPort) }
+	        : {}),
+	      ...(runtimeExpoPort &&
+	      !existingPinnedExpoPort &&
+	      isPortWithinRange(runtimeExpoPort, expoBase, expoRange)
+	        ? { HAPPIER_STACK_EXPO_DEV_PORT: String(runtimeExpoPort) }
+        : {}),
+    };
+    await syncRepoLocalEnvFile({ envPath: stacklessEnvPath, managedEnv, pruneKeys });
   }
 
   const cmd = process.execPath;
@@ -350,6 +501,7 @@ function main() {
             HAPPIER_STACK_SERVER_PORT: effectiveEnv.HAPPIER_STACK_SERVER_PORT,
             HAPPIER_STACK_ENV_FILE: effectiveEnv.HAPPIER_STACK_ENV_FILE,
             HAPPIER_STACK_CLI_HOME_DIR: effectiveEnv.HAPPIER_STACK_CLI_HOME_DIR,
+            HAPPIER_STACK_LOG_TEE_DIR: effectiveEnv.HAPPIER_STACK_LOG_TEE_DIR,
             HAPPIER_ACTIVE_SERVER_ID: effectiveEnv.HAPPIER_ACTIVE_SERVER_ID,
             HAPPIER_STACK_INVOKED_CWD: effectiveEnv.HAPPIER_STACK_INVOKED_CWD,
           },
@@ -361,8 +513,29 @@ function main() {
     return;
   }
 
+  try {
+    await maybeAutoInstallRepoDeps({
+      repoRoot,
+      cmd: subcommand,
+      env: effectiveEnv,
+      autoInstallOverride,
+      preflightRootOverride,
+    });
+  } catch (e) {
+    process.stderr.write(`[repo-local] failed to install repo deps\n${String(e?.stack ?? e)}\n`);
+    process.stderr.write('\nFix:\n  corepack enable\n  yarn install\n');
+    process.exit(1);
+  }
+
+  if (preflightOnly === '1') {
+    process.exit(0);
+  }
+
   const res = spawnSync(cmd, args, { cwd, env: effectiveEnv, stdio: 'inherit' });
   process.exit(res.status ?? 1);
 }
 
-main();
+main().catch((e) => {
+  process.stderr.write(`[repo-local] ${String(e?.stack ?? e)}\n`);
+  process.exit(1);
+});

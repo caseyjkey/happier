@@ -6,14 +6,10 @@ import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('react-native', () => ({
   Platform: { OS: 'web', select: (values: any) => values?.default ?? values?.web ?? values?.ios ?? values?.android },
+  AppState: { addEventListener: () => ({ remove: () => {} }) },
   Pressable: 'Pressable',
   Text: 'Text',
   View: 'View',
-}));
-
-vi.mock('react-native-unistyles', () => ({
-  useUnistyles: () => ({ theme: { colors: { surfacePressed: '#eee', surfacePressedOverlay: '#eee', divider: '#ddd', text: '#111', textSecondary: '#666', textDestructive: '#c00' } } }),
-  StyleSheet: { create: (fn: any) => fn({ colors: { surfacePressed: '#eee', surfacePressedOverlay: '#eee', divider: '#ddd', text: '#111', textSecondary: '#666', textDestructive: '#c00' } }, {}) },
 }));
 
 vi.mock('@/constants/Typography', () => ({

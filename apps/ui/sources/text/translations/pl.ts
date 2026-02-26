@@ -155,6 +155,10 @@ export const pl: TranslationStructure = {
     terminalUrlPlaceholder: "happier://terminal?...",
     restoreQrInstructions:
       "1. Otwórz Happier na urządzeniu mobilnym\n2. Przejdź do Ustawienia → Konto\n3. Dotknij „Połącz nowe urządzenie”\n4. Zeskanuj ten kod QR",
+    externalAuthVerifiedTitle: ({ provider }: { provider: string }) =>
+      `${provider} zweryfikowano`,
+    externalAuthVerifiedBody: ({ provider }: { provider: string }) =>
+      `Znaleźliśmy istniejące konto Happier powiązane z ${provider}. Aby dokończyć logowanie na tym urządzeniu, przywróć klucz konta za pomocą kodu QR lub klucza tajnego.`,
     restoreWithSecretKeyInstead: "Przywróć za pomocą klucza tajnego",
     restoreWithSecretKeyDescription:
       "Wpisz swój klucz tajny, aby odzyskać dostęp do konta.",
@@ -382,6 +386,19 @@ export const pl: TranslationStructure = {
     compactSessionViewMinimal: "Minimalny widok kompaktowy",
     compactSessionViewMinimalDescription:
       "Usuń awatary i pokaż bardzo kompaktowy układ wiersza sesji",
+    text: "Tekst",
+    textDescription: "Dostosuj rozmiar tekstu w aplikacji",
+    textSize: "Rozmiar tekstu",
+    textSizeDescription: "Zwiększ lub zmniejsz tekst",
+    textSizeOptions: {
+      xxsmall: "Bardzo bardzo mały",
+      xsmall: "Bardzo mały",
+      small: "Mały",
+      default: "Domyślny",
+      large: "Duży",
+      xlarge: "Bardzo duży",
+      xxlarge: "Bardzo bardzo duży",
+    },
   },
 
   settingsFeatures: {
@@ -582,7 +599,7 @@ export const pl: TranslationStructure = {
     codexAcpNotInstalledTitle:
       "Codex ACP nie jest zainstalowane na tej maszynie",
     codexAcpNotInstalledMessage:
-      "Aby użyć eksperymentu Codex ACP, zainstaluj codex-acp na maszynie docelowej (Szczegóły maszyny → Codex ACP) lub wyłącz eksperyment.",
+      "Aby użyć eksperymentu Codex ACP, zainstaluj codex-acp na maszynie docelowej (Szczegóły maszyny → Installables) lub wyłącz eksperyment.",
   },
 
   deps: {
@@ -1040,6 +1057,8 @@ export const pl: TranslationStructure = {
     kiloSessionIdCopied: "ID sesji Kilo skopiowane do schowka",
     piSessionId: "ID sesji Pi",
     piSessionIdCopied: "ID sesji Pi skopiowane do schowka",
+    copilotSessionId: "Copilot Session ID",
+    copilotSessionIdCopied: "Copilot Session ID copied to clipboard",
     metadataCopied: "Metadane skopiowane do schowka",
     failedToCopyMetadata: "Nie udało się skopiować metadanych",
     failedToKillSession: "Nie udało się zakończyć sesji",
@@ -1202,6 +1221,7 @@ export const pl: TranslationStructure = {
       kimi: "Kimi",
       kilo: "Kilo",
       pi: "Pi",
+      copilot: "Copilot",
     },
     auggieIndexingChip: {
       on: "Indexing on",
@@ -1451,6 +1471,19 @@ export const pl: TranslationStructure = {
     file: "Plik",
     fileEmpty: "Plik jest pusty",
     noChanges: "Brak zmian do wyświetlenia",
+  },
+
+  settingsNotifications: {
+    foregroundBehavior: {
+      title: "Powiadomienia w aplikacji",
+      footer: "Kontroluje powiadomienia podczas korzystania z aplikacji. Powiadomienia dla aktualnie przeglądanej sesji są zawsze wyciszane.",
+      full: "Pełne",
+      fullDescription: "Pokaż baner i odtwórz dźwięk",
+      silent: "Ciche",
+      silentDescription: "Pokaż baner bez dźwięku",
+      off: "Wyłączone",
+      offDescription: "Tylko plakietka, bez banera",
+    },
   },
 
   settingsSession: {
@@ -2063,6 +2096,12 @@ export const pl: TranslationStructure = {
       `Kontynuuj z ${provider}`,
     linkOrRestoreAccount: "Połącz lub przywróć konto",
     loginWithMobileApp: "Zaloguj się przez aplikację mobilną",
+    serverUnavailableTitle: "Nie można połączyć się z serwerem",
+    serverUnavailableBody: ({ serverUrl }: { serverUrl: string }) =>
+      `Nie możemy połączyć się z ${serverUrl}. Spróbuj ponownie lub zmień serwer, aby kontynuować.`,
+    serverIncompatibleTitle: "Serwer nie jest obsługiwany",
+    serverIncompatibleBody: ({ serverUrl }: { serverUrl: string }) =>
+      `Serwer pod adresem ${serverUrl} zwrócił nieoczekiwaną odpowiedź. Zaktualizuj serwer lub zmień serwer, aby kontynuować.`,
   },
 
   review: {
@@ -2079,7 +2118,7 @@ export const pl: TranslationStructure = {
       `${label} skopiowano do schowka`,
   },
 
-  machine: {
+	  machine: {
     offlineUnableToSpawn: "Launcher wyłączony, gdy maszyna jest offline",
     offlineHelp:
       "• Upewnij się, że komputer jest online\n• Uruchom `happier daemon status`, aby zdiagnozować\n• Czy używasz najnowszej wersji CLI? Zaktualizuj poleceniem `npm install -g @happier-dev/cli@latest`",
@@ -2095,13 +2134,22 @@ export const pl: TranslationStructure = {
     renameTitle: "Zmień nazwę maszyny",
     renameDescription:
       "Nadaj tej maszynie własną nazwę. Pozostaw puste, aby użyć domyślnej nazwy hosta.",
-    renamePlaceholder: "Wpisz nazwę maszyny",
-    renamedSuccess: "Nazwa maszyny została zmieniona",
-    renameFailed: "Nie udało się zmienić nazwy maszyny",
-    lastKnownPid: "Ostatni znany PID",
-    lastKnownHttpPort: "Ostatni znany port HTTP",
-    startedAt: "Uruchomiony o",
-    cliVersion: "Wersja CLI",
+	    renamePlaceholder: "Wpisz nazwę maszyny",
+	    renamedSuccess: "Nazwa maszyny została zmieniona",
+	    renameFailed: "Nie udało się zmienić nazwy maszyny",
+	    actions: {
+	      removeMachine: "Remove Machine",
+	      removeMachineSubtitle:
+	        "Revokes this machine and removes it from your account.",
+	      removeMachineConfirmBody:
+	        "This will revoke access from this machine (including access keys and automation assignments). You can reconnect later by signing in again from the CLI.",
+	      removeMachineAlreadyRemoved:
+	        "This machine has already been removed from your account.",
+	    },
+	    lastKnownPid: "Ostatni znany PID",
+	    lastKnownHttpPort: "Ostatni znany port HTTP",
+	    startedAt: "Uruchomiony o",
+	    cliVersion: "Wersja CLI",
     daemonStateVersion: "Wersja stanu daemon",
     activeSessions: ({ count }: { count: number }) =>
       `Aktywne sesje (${count})`,
@@ -2603,6 +2651,7 @@ export const pl: TranslationStructure = {
       kimiSubtitleExperimental: "Kimi CLI (eksperymentalne)",
       kiloSubtitleExperimental: "Kilo CLI (eksperymentalne)",
       piSubtitleExperimental: "Pi CLI (eksperymentalne)",
+      copilotSubtitleExperimental: "GitHub Copilot CLI (experimental)",
     },
     tmux: {
       title: "Tmux",

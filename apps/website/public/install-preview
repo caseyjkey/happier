@@ -8,6 +8,9 @@ BIN_DIR="${HAPPIER_BIN_DIR:-$HOME/.local/bin}"
 WITH_DAEMON="${HAPPIER_WITH_DAEMON:-1}"
 NO_PATH_UPDATE="${HAPPIER_NO_PATH_UPDATE:-0}"
 NONINTERACTIVE="${HAPPIER_NONINTERACTIVE:-0}"
+ACTION="${HAPPIER_INSTALLER_ACTION:-install}" # install|reinstall|version|check|uninstall|restart
+DEBUG_MODE="${HAPPIER_INSTALLER_DEBUG:-0}"
+PURGE_INSTALL_DIR="${HAPPIER_INSTALLER_PURGE:-0}"
 GITHUB_REPO="${HAPPIER_GITHUB_REPO:-happier-dev/happier}"
 GITHUB_TOKEN="${HAPPIER_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
 DEFAULT_MINISIGN_PUBKEY="$(cat <<'EOF'
@@ -19,87 +22,60 @@ MINISIGN_PUBKEY="${HAPPIER_MINISIGN_PUBKEY:-${DEFAULT_MINISIGN_PUBKEY}}"
 MINISIGN_PUBKEY_URL="${HAPPIER_MINISIGN_PUBKEY_URL:-https://happier.dev/happier-release.pub}"
 MINISIGN_BIN="minisign"
 
-usage() {
-  cat <<'EOF'
-Usage:
-  curl -fsSL https://happier.dev/install | bash
+INSTALLER_COLOR_MODE="${HAPPIER_INSTALLER_COLOR:-auto}" # auto|always|never
 
-Preview channel:
-  curl -fsSL https://happier.dev/install | bash -s -- --channel preview
-  curl -fsSL https://happier.dev/install | HAPPIER_CHANNEL=preview bash
-  curl -fsSL https://happier.dev/install-preview | bash
-
-Options:
-  --channel <stable|preview>
-  --stable
-  --preview
-  --with-daemon
-  --without-daemon
-  -h, --help
-EOF
+supports_color() {
+  if [[ "${INSTALLER_COLOR_MODE}" == "never" ]]; then
+    return 1
+  fi
+  if [[ -n "${NO_COLOR:-}" ]]; then
+    return 1
+  fi
+  if [[ "${INSTALLER_COLOR_MODE}" == "always" ]]; then
+    return 0
+  fi
+  [[ -t 1 ]] && [[ "${TERM:-}" != "dumb" ]]
 }
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --channel)
-      if [[ $# -lt 2 || -z "${2:-}" ]]; then
-        echo "Missing value for --channel" >&2
-        usage >&2
-        exit 1
-      fi
-      CHANNEL="${2}"
-      shift 2
-      ;;
-    --channel=*)
-      CHANNEL="${1#*=}"
-      if [[ -z "${CHANNEL}" ]]; then
-        echo "Missing value for --channel" >&2
-        usage >&2
-        exit 1
-      fi
-      shift 1
-      ;;
-    --stable)
-      CHANNEL="stable"
-      shift 1
-      ;;
-    --preview)
-      CHANNEL="preview"
-      shift 1
-      ;;
-    --with-daemon)
-      WITH_DAEMON="1"
-      shift 1
-      ;;
-    --without-daemon)
-      WITH_DAEMON="0"
-      shift 1
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    --)
-      shift 1
-      break
-      ;;
-    *)
-      echo "Unknown argument: $1" >&2
-      usage >&2
-      exit 1
-      ;;
-  esac
-done
-
-if [[ "${CHANNEL}" != "stable" && "${CHANNEL}" != "preview" ]]; then
-  echo "Invalid HAPPIER_CHANNEL='${CHANNEL}'. Expected stable or preview." >&2
-  exit 1
+if supports_color; then
+  COLOR_RESET=$'\033[0m'
+  COLOR_BOLD=$'\033[1m'
+  COLOR_GREEN=$'\033[32m'
+  COLOR_YELLOW=$'\033[33m'
+  COLOR_CYAN=$'\033[36m'
+else
+  COLOR_RESET=""
+  COLOR_BOLD=""
+  COLOR_GREEN=""
+  COLOR_YELLOW=""
+  COLOR_CYAN=""
 fi
 
-if [[ "${PRODUCT}" != "cli" && "${PRODUCT}" != "server" ]]; then
-  echo "Invalid HAPPIER_PRODUCT='${PRODUCT}'. Expected cli or server." >&2
-  exit 1
-fi
+say() {
+  printf '%s\n' "$*"
+}
+
+info() {
+  say "${COLOR_CYAN}$*${COLOR_RESET}"
+}
+
+success() {
+  say "${COLOR_GREEN}$*${COLOR_RESET}"
+}
+
+warn() {
+  say "${COLOR_YELLOW}$*${COLOR_RESET}"
+}
+
+shell_command_cache_hint() {
+  local shell_name
+  shell_name="$(basename "${SHELL:-}")"
+  if [[ "${shell_name}" == "zsh" ]]; then
+    say "  rehash"
+  else
+    say "  hash -r"
+  fi
+}
 
 detect_os() {
   case "$(uname -s)" in
@@ -175,6 +151,387 @@ json_lookup_asset_url() {
   '
 }
 
+resolve_exe_name() {
+  if [[ "${PRODUCT}" == "server" ]]; then
+    echo "happier-server"
+  else
+    echo "happier"
+  fi
+}
+
+resolve_install_name() {
+  if [[ "${PRODUCT}" == "server" ]]; then
+    echo "Happier Server"
+  else
+    echo "Happier CLI"
+  fi
+}
+
+resolve_installed_binary() {
+  local exe
+  exe="$(resolve_exe_name)"
+  local candidate="${INSTALL_DIR}/bin/${exe}"
+  if [[ -x "${candidate}" ]]; then
+    printf '%s' "${candidate}"
+    return 0
+  fi
+  local from_path
+  from_path="$(command -v "${exe}" 2>/dev/null || true)"
+  if [[ -n "${from_path}" ]] && [[ -x "${from_path}" ]]; then
+    printf '%s' "${from_path}"
+    return 0
+  fi
+  return 1
+}
+
+action_check() {
+  local exe
+  exe="$(resolve_exe_name)"
+  local name
+  name="$(resolve_install_name)"
+
+  local ok="1"
+  local binary_path="${INSTALL_DIR}/bin/${exe}"
+  local shim_path="${BIN_DIR}/${exe}"
+
+  info "${name} check"
+  say "- product: ${PRODUCT}"
+  say "- binary: ${binary_path}"
+  say "- shim: ${shim_path}"
+
+  if [[ ! -x "${binary_path}" ]]; then
+    warn "Missing binary: ${binary_path}"
+    ok="0"
+  fi
+
+  if [[ ! -e "${shim_path}" ]]; then
+    warn "Missing shim: ${shim_path}"
+  fi
+
+  local resolved=""
+  resolved="$(command -v "${exe}" 2>/dev/null || true)"
+  if [[ -n "${resolved}" ]]; then
+    say "- command: ${resolved}"
+  else
+    warn "Command not found on PATH: ${exe}"
+  fi
+
+  local resolved_binary=""
+  resolved_binary="$(resolve_installed_binary 2>/dev/null || true)"
+  if [[ -n "${resolved_binary}" ]]; then
+    local version_out=""
+    version_out="$("${resolved_binary}" --version 2>/dev/null || true)"
+    if [[ -n "${version_out}" ]]; then
+      say "- version: ${version_out}"
+    else
+      warn "Failed to execute: ${resolved_binary}"
+      ok="0"
+    fi
+  fi
+
+  if command -v file >/dev/null 2>&1 && [[ -x "${binary_path}" ]]; then
+    say
+    say "file:"
+    file "${binary_path}" || true
+  fi
+  if command -v xattr >/dev/null 2>&1 && [[ -e "${binary_path}" ]]; then
+    say
+    say "xattr:"
+    xattr -l "${binary_path}" 2>/dev/null || true
+  fi
+
+  say
+  say "Shell tip (if PATH changed in this session):"
+  shell_command_cache_hint
+
+  if [[ "${ok}" == "1" ]]; then
+    success "OK"
+    return 0
+  fi
+  warn "${name} is not installed correctly."
+  return 1
+}
+
+action_restart() {
+  local exe
+  exe="$(resolve_exe_name)"
+  local name
+  name="$(resolve_install_name)"
+
+  local binary=""
+  binary="$(resolve_installed_binary 2>/dev/null || true)"
+  if [[ -z "${binary}" ]]; then
+    warn "${name} is not installed."
+    return 1
+  fi
+  if [[ "${PRODUCT}" != "cli" ]]; then
+    warn "Restart is only supported for the CLI daemon."
+    return 1
+  fi
+
+  info "Restarting daemon service (best-effort)..."
+  if ! "${binary}" daemon service restart >/dev/null 2>&1; then
+    warn "Daemon service restart failed (it may not be installed)."
+    warn "Try: ${binary} daemon service install"
+    return 1
+  fi
+  success "Daemon service restarted."
+  return 0
+}
+
+action_uninstall() {
+  local exe
+  exe="$(resolve_exe_name)"
+  local name
+  name="$(resolve_install_name)"
+
+  local binary=""
+  binary="$(resolve_installed_binary 2>/dev/null || true)"
+  if [[ -n "${binary}" && "${PRODUCT}" == "cli" ]]; then
+    "${binary}" daemon service uninstall >/dev/null 2>&1 || true
+  fi
+
+  rm -f "${BIN_DIR}/${exe}" "${INSTALL_DIR}/bin/${exe}.new" "${INSTALL_DIR}/bin/${exe}.previous" || true
+  rm -f "${INSTALL_DIR}/bin/${exe}" || true
+  if [[ "${PURGE_INSTALL_DIR}" == "1" ]]; then
+    rm -rf "${INSTALL_DIR}" || true
+  fi
+
+  success "${name} uninstalled."
+  say "Tip: if your shell still can't find changes, run:"
+  shell_command_cache_hint
+  return 0
+}
+
+tar_extract_gz() {
+  local archive_path="$1"
+  local dest_dir="$2"
+  mkdir -p "${dest_dir}"
+  # GNU tar on Linux emits noisy, non-actionable warnings when extracting archives created by bsdtar/libarchive:
+  #   "Ignoring unknown extended header keyword 'LIBARCHIVE.xattr...'"
+  # Filter those while preserving real errors.
+  tar -xzf "${archive_path}" -C "${dest_dir}" 2> >(grep -v -E "^tar: Ignoring unknown extended header keyword" >&2 || true)
+}
+
+action_version() {
+  local name
+  name="$(resolve_install_name)"
+
+  if [[ "${CHANNEL}" != "stable" && "${CHANNEL}" != "preview" ]]; then
+    echo "Invalid HAPPIER_CHANNEL='${CHANNEL}'. Expected stable or preview." >&2
+    return 1
+  fi
+
+  local os=""
+  local arch=""
+  os="$(detect_os)"
+  arch="$(detect_arch)"
+  if [[ "${os}" == "unsupported" || "${arch}" == "unsupported" ]]; then
+    echo "Unsupported platform: $(uname -s)/$(uname -m)" >&2
+    return 1
+  fi
+
+  local tag="cli-stable"
+  local asset_regex="^happier-v.*-${os}-${arch}[.]tar[.]gz$"
+  local version_prefix="happier-v"
+  if [[ "${PRODUCT}" == "server" ]]; then
+    tag="server-stable"
+    asset_regex="^happier-server-v.*-${os}-${arch}[.]tar[.]gz$"
+    version_prefix="happier-server-v"
+  fi
+  if [[ "${CHANNEL}" == "preview" ]]; then
+    if [[ "${PRODUCT}" == "server" ]]; then
+      tag="server-preview"
+    else
+      tag="cli-preview"
+    fi
+  fi
+
+  local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${tag}"
+  info "Fetching ${tag} release metadata..."
+  curl_auth() {
+    if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+      curl -fsSL \
+        -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "$@"
+      return
+    fi
+    curl -fsSL "$@"
+  }
+
+  local release_json=""
+  if ! release_json="$(curl_auth "${api_url}")"; then
+    echo "Failed to fetch release metadata for ${name}." >&2
+    return 1
+  fi
+  local asset_url=""
+  asset_url="$(json_lookup_asset_url "${release_json}" "${asset_regex}")"
+  if [[ -z "${asset_url}" ]]; then
+    echo "Unable to locate release assets for ${OS}-${ARCH} on tag ${tag}." >&2
+    return 1
+  fi
+  local asset_name=""
+  asset_name="$(basename "${asset_url}")"
+  local version=""
+  version="${asset_name#${version_prefix}}"
+  version="${version%-${os}-${arch}.tar.gz}"
+  if [[ -z "${version}" || "${version}" == "${asset_name}" ]]; then
+    echo "Failed to infer release version from asset name: ${asset_name}" >&2
+    return 1
+  fi
+
+  say "${name} installer version check"
+  say "- channel: ${CHANNEL}"
+  say "- product: ${PRODUCT}"
+  say "- platform: ${os}-${arch}"
+  say "- version: ${version}"
+  return 0
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  curl -fsSL https://happier.dev/install | bash
+
+Preview channel:
+  curl -fsSL https://happier.dev/install | bash -s -- --channel preview
+  curl -fsSL https://happier.dev/install | HAPPIER_CHANNEL=preview bash
+  curl -fsSL https://happier.dev/install-preview | bash
+
+Options:
+  --channel <stable|preview>
+  --stable
+  --preview
+  --with-daemon
+  --without-daemon
+  --check
+  --version
+  --reinstall
+  --restart
+  --uninstall [--purge]
+  --reset
+  --debug
+  -h, --help
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --channel)
+      if [[ $# -lt 2 || -z "${2:-}" ]]; then
+        echo "Missing value for --channel" >&2
+        usage >&2
+        exit 1
+      fi
+      CHANNEL="${2}"
+      shift 2
+      ;;
+    --channel=*)
+      CHANNEL="${1#*=}"
+      if [[ -z "${CHANNEL}" ]]; then
+        echo "Missing value for --channel" >&2
+        usage >&2
+        exit 1
+      fi
+      shift 1
+      ;;
+    --stable)
+      CHANNEL="stable"
+      shift 1
+      ;;
+    --preview)
+      CHANNEL="preview"
+      shift 1
+      ;;
+    --with-daemon)
+      WITH_DAEMON="1"
+      shift 1
+      ;;
+    --without-daemon)
+      WITH_DAEMON="0"
+      shift 1
+      ;;
+    --check)
+      ACTION="check"
+      shift 1
+      ;;
+    --version)
+      ACTION="version"
+      shift 1
+      ;;
+    --reinstall)
+      ACTION="install"
+      shift 1
+      ;;
+    --restart)
+      ACTION="restart"
+      shift 1
+      ;;
+    --uninstall)
+      ACTION="uninstall"
+      shift 1
+      ;;
+    --reset)
+      ACTION="uninstall"
+      PURGE_INSTALL_DIR="1"
+      shift 1
+      ;;
+    --purge)
+      PURGE_INSTALL_DIR="1"
+      shift 1
+      ;;
+    --debug)
+      DEBUG_MODE="1"
+      shift 1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift 1
+      break
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ "${DEBUG_MODE}" == "1" ]]; then
+  set -x
+fi
+
+if [[ "${PRODUCT}" != "cli" && "${PRODUCT}" != "server" ]]; then
+  echo "Invalid HAPPIER_PRODUCT='${PRODUCT}'. Expected cli or server." >&2
+  exit 1
+fi
+
+if [[ "${ACTION}" == "check" ]]; then
+  action_check
+  exit $?
+fi
+if [[ "${ACTION}" == "version" ]]; then
+  action_version
+  exit $?
+fi
+if [[ "${ACTION}" == "restart" ]]; then
+  action_restart
+  exit $?
+fi
+if [[ "${ACTION}" == "uninstall" ]]; then
+  action_uninstall
+  exit $?
+fi
+
+if [[ "${CHANNEL}" != "stable" && "${CHANNEL}" != "preview" ]]; then
+  echo "Invalid HAPPIER_CHANNEL='${CHANNEL}'. Expected stable or preview." >&2
+  exit 1
+fi
+
 sha256_file() {
   local path="$1"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -225,7 +582,7 @@ ensure_minisign() {
   local extract_dir="${TMP_DIR}/minisign-extract"
   mkdir -p "${extract_dir}"
   if [[ "${asset}" == *.tar.gz ]]; then
-    tar -xzf "${archive_path}" -C "${extract_dir}"
+    tar_extract_gz "${archive_path}" "${extract_dir}"
   else
     # Prefer built-in macOS tooling to avoid requiring unzip.
     if command -v ditto >/dev/null 2>&1; then
@@ -292,16 +649,58 @@ append_path_hint() {
   fi
   local shell_name
   shell_name="$(basename "${SHELL:-}")"
-  local rc_file
-  case "${shell_name}" in
-    zsh) rc_file="$HOME/.zshrc" ;;
-    bash) rc_file="$HOME/.bashrc" ;;
-    *) rc_file="$HOME/.profile" ;;
-  esac
   local export_line="export PATH=\"${BIN_DIR}:\$PATH\""
-  if [[ ! -f "${rc_file}" ]] || ! grep -Fq "${export_line}" "${rc_file}"; then
-    printf '\n%s\n' "${export_line}" >> "${rc_file}"
-    echo "Added ${BIN_DIR} to PATH in ${rc_file}"
+  local rc_files=()
+  case "${shell_name}" in
+    zsh)
+      rc_files+=("$HOME/.zshrc")
+      rc_files+=("$HOME/.zprofile")
+      ;;
+    bash)
+      rc_files+=("$HOME/.bashrc")
+      if [[ -f "$HOME/.bash_profile" ]]; then
+        rc_files+=("$HOME/.bash_profile")
+      else
+        rc_files+=("$HOME/.profile")
+      fi
+      ;;
+    *)
+      rc_files+=("$HOME/.profile")
+      ;;
+  esac
+
+  local updated=0
+  for rc_file in "${rc_files[@]}"; do
+    if [[ ! -f "${rc_file}" ]] || ! grep -Fq "${export_line}" "${rc_file}"; then
+      printf '\n%s\n' "${export_line}" >> "${rc_file}"
+      info "Added ${BIN_DIR} to PATH in ${rc_file}"
+      updated=1
+    fi
+  done
+
+  if [[ ":${PATH}:" != *":${BIN_DIR}:"* ]]; then
+    echo
+    say "${COLOR_BOLD}Next steps${COLOR_RESET}"
+    say "To use ${EXE_NAME} in your current shell:"
+    say "  export PATH=\"${BIN_DIR}:\$PATH\""
+    if [[ "${shell_name}" == "bash" ]]; then
+      say "  source \"$HOME/.bashrc\""
+      if [[ -f "$HOME/.bash_profile" ]]; then
+        say "  source \"$HOME/.bash_profile\""
+      else
+        say "  source \"$HOME/.profile\""
+      fi
+    elif [[ "${shell_name}" == "zsh" ]]; then
+      say "  source \"$HOME/.zshrc\""
+    else
+      say "  source \"$HOME/.profile\""
+    fi
+    say "If your shell still can't find ${EXE_NAME}, run:"
+    shell_command_cache_hint
+    say "Or open a new terminal."
+  elif [[ "${updated}" == "1" ]]; then
+    echo
+    say "PATH is already configured in this shell."
   fi
 }
 
@@ -350,7 +749,7 @@ if [[ "${CHANNEL}" == "preview" ]]; then
 fi
 
 API_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${TAG}"
-echo "Fetching ${TAG} release metadata..."
+info "Fetching ${TAG} release metadata..."
 curl_auth() {
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
     curl -fsSL \
@@ -396,6 +795,9 @@ fi
 
 TMP_DIR="$(mktemp -d)"
 cleanup() {
+  if [[ "${DEBUG_MODE}" == "1" ]]; then
+    return
+  fi
   rm -rf "${TMP_DIR}"
 }
 trap cleanup EXIT
@@ -415,7 +817,7 @@ if [[ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]]; then
   echo "Checksum verification failed." >&2
   exit 1
 fi
-echo "Checksum verified."
+success "Checksum verified."
 
 if ! ensure_minisign; then
   echo "minisign is required for installer signature verification." >&2
@@ -428,11 +830,11 @@ SIG_PATH="${TMP_DIR}/checksums.txt.minisig"
 write_minisign_public_key "${PUBKEY_PATH}"
 curl_auth -o "${SIG_PATH}" "${SIG_URL}"
 "${MINISIGN_BIN}" -Vm "${CHECKSUMS_PATH}" -x "${SIG_PATH}" -p "${PUBKEY_PATH}" >/dev/null
-echo "Signature verified."
+success "Signature verified."
 
 EXTRACT_DIR="${TMP_DIR}/extract"
 mkdir -p "${EXTRACT_DIR}"
-tar -xzf "${ARCHIVE_PATH}" -C "${EXTRACT_DIR}"
+tar_extract_gz "${ARCHIVE_PATH}" "${EXTRACT_DIR}"
 
 BINARY_PATH="$(find "${EXTRACT_DIR}" -type f -name "${EXE_NAME}" -perm -u+x | head -n 1 || true)"
 if [[ -z "${BINARY_PATH}" ]]; then
@@ -441,15 +843,25 @@ if [[ -z "${BINARY_PATH}" ]]; then
 fi
 
 mkdir -p "${INSTALL_DIR}/bin" "${BIN_DIR}"
-cp "${BINARY_PATH}" "${INSTALL_DIR}/bin/${EXE_NAME}"
-chmod +x "${INSTALL_DIR}/bin/${EXE_NAME}"
+TARGET_BIN="${INSTALL_DIR}/bin/${EXE_NAME}"
+STAGED_BIN="${TARGET_BIN}.new"
+PREVIOUS_BIN="${TARGET_BIN}.previous"
+cp "${BINARY_PATH}" "${STAGED_BIN}"
+chmod +x "${STAGED_BIN}"
+if [[ -f "${TARGET_BIN}" ]]; then
+  cp "${TARGET_BIN}" "${PREVIOUS_BIN}" >/dev/null 2>&1 || true
+  chmod +x "${PREVIOUS_BIN}" >/dev/null 2>&1 || true
+fi
+# Avoid ETXTBSY when replacing a running executable: swap the directory entry atomically.
+mv -f "${STAGED_BIN}" "${TARGET_BIN}"
+chmod +x "${TARGET_BIN}"
 ln -sf "${INSTALL_DIR}/bin/${EXE_NAME}" "${BIN_DIR}/${EXE_NAME}"
 
 append_path_hint
 
 if [[ "${PRODUCT}" == "cli" && "${WITH_DAEMON}" == "1" ]]; then
   echo
-  echo "Installing daemon service (user-mode)..."
+  info "Installing daemon service (user-mode)..."
   if ! "${INSTALL_DIR}/bin/${EXE_NAME}" daemon service install >/dev/null 2>&1; then
     echo "Warning: daemon service install failed. You can retry manually:" >&2
     echo "  ${INSTALL_DIR}/bin/${EXE_NAME} daemon service install" >&2

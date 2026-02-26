@@ -2,6 +2,7 @@ import type { AuthCredentials } from '@/auth/storage/tokenStorage';
 import { HappyError } from '@/utils/errors/errors';
 import { backoff } from '@/utils/timing/time';
 import { serverFetch } from '@/sync/http/client';
+import { t } from '@/text';
 
 import type { AuthProvider } from '@/auth/providers/types';
 import type { AuthProviderId } from '@happier-dev/protocol';
@@ -14,6 +15,7 @@ export function createExternalOAuthProvider(params: {
     badgeIconName?: string;
     supportsProfileBadge?: boolean;
     connectButtonColor?: string;
+    getRestoreRedirectNotice?: AuthProvider['getRestoreRedirectNotice'];
 }): AuthProvider {
     const providerId = params.id.toString().trim().toLowerCase();
     const providerName = params.displayName;
@@ -24,6 +26,15 @@ export function createExternalOAuthProvider(params: {
         badgeIconName: params.badgeIconName,
         supportsProfileBadge: params.supportsProfileBadge,
         connectButtonColor: params.connectButtonColor,
+        getRestoreRedirectNotice: params.getRestoreRedirectNotice
+            ? params.getRestoreRedirectNotice
+            : ({ reason }) => {
+                if (reason !== 'provider_already_linked') return null;
+                return {
+                    title: t('connect.externalAuthVerifiedTitle', { provider: providerName }),
+                    body: t('connect.externalAuthVerifiedBody', { provider: providerName }),
+                };
+            },
         getExternalSignupUrl: async ({ publicKey }) => {
             const response = await serverFetch(
                 `/v1/auth/external/${encodeURIComponent(providerId)}/params?publicKey=${encodeURIComponent(publicKey)}`,
@@ -45,6 +56,35 @@ export function createExternalOAuthProvider(params: {
             const data = (await response.json()) as any;
             if (!data?.url) {
                 throw new Error('external-signup-unavailable');
+            }
+            return String(data.url);
+        },
+        getExternalLoginUrl: async ({ proofHash }) => {
+            const normalizedProofHash = String(proofHash ?? '').trim();
+            if (!normalizedProofHash) {
+                throw new Error('external-login-unavailable');
+            }
+
+            const response = await serverFetch(
+                `/v1/auth/external/${encodeURIComponent(providerId)}/params?mode=keyless&proofHash=${encodeURIComponent(normalizedProofHash)}`,
+                undefined,
+                { includeAuth: false },
+            );
+            if (!response.ok) {
+                if (response.status === 400) {
+                    const error = await response.json().catch(() => null);
+                    if (error?.error === OAUTH_NOT_CONFIGURED_ERROR) {
+                        throw new HappyError(`${providerName} OAuth is not configured on this server.`, false, {
+                            status: 400,
+                            kind: 'config',
+                        });
+                    }
+                }
+                throw new Error('external-login-unavailable');
+            }
+            const data = (await response.json()) as any;
+            if (!data?.url) {
+                throw new Error('external-login-unavailable');
             }
             return String(data.url);
         },

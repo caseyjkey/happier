@@ -9,11 +9,28 @@ Use `/apps/server/.env.example` as your base env template and load the same valu
 
 ## Prebuilt images (recommended)
 
-We publish preview Docker images on Docker Hub:
+We publish preview Docker images on Docker Hub (recommended):
 
 ```bash
 docker pull happierdev/relay-server:preview
 ```
+
+We also publish the same images to GitHub Container Registry (GHCR):
+
+```bash
+docker pull ghcr.io/happier-dev/relay-server:preview
+```
+
+Published images:
+
+- `relay-server`: Happier Server + embedded web UI (this page)
+- `dev-box`: Happier CLI + daemon in Docker (see: [Dev box](../development/devcontainers))
+
+Tags:
+
+- `:preview` (floating preview tag)
+- `:preview-<short-sha>` (immutable preview build)
+- `:stable` / `:latest` (stable channel, when enabled)
 
 The `relay-server` image defaults to the **light flavor + SQLite**, with all data stored under `/data`. Mount it as a volume so upgrades and restarts are safe.
 
@@ -23,6 +40,12 @@ docker run --rm -p 3005:3005 \
   happierdev/relay-server:preview
 ```
 
+Configuration docs:
+
+- Server env var reference: [Environment variables](./env)
+- Server auth policy (GitHub/OIDC/anonymous, etc): [Server Auth](../server/auth)
+- If you’re running a headless machine and want to pair/authenticate without a browser: [Daemon auth (headless)](../clients/daemon#headless-authentication-no-tty)
+
 Notes:
 
 - This Docker image runs the Happier Server directly (a self-host-friendly default config).
@@ -30,6 +53,105 @@ Notes:
   - Disable UI serving: set `HAPPIER_SERVER_UI_DIR=` (empty).
   - Serve UI under `/ui`: set `HAPPIER_SERVER_UI_PREFIX=/ui`.
 - It does not install a managed host service. Upgrades happen when the container is restarted after pulling a new image tag.
+
+### Prebuilt image: use Postgres (full flavor)
+
+The `relay-server` image is built from the same server code and can run full flavor too — you just override the defaults.
+
+Example `docker-compose.yml` (Postgres + local files backend):
+
+```yaml
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: happier
+      POSTGRES_USER: happier
+      POSTGRES_PASSWORD: change-me
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  relay:
+    image: happierdev/relay-server:preview
+    ports:
+      - "3005:3005"
+    environment:
+      PORT: "3005"
+      HAPPIER_SERVER_FLAVOR: full
+      HAPPIER_DB_PROVIDER: postgres
+      DATABASE_URL: postgresql://happier:change-me@db:5432/happier
+      HANDY_MASTER_SECRET: change-me-to-a-long-random-string
+      HAPPIER_FILES_BACKEND: local
+      HAPPIER_SERVER_LIGHT_DATA_DIR: /data/happier
+    volumes:
+      - happier-relay-data:/data/happier
+    depends_on:
+      - db
+
+volumes:
+  pgdata:
+  happier-relay-data:
+```
+
+For S3/Minio instead of local files, set `HAPPIER_FILES_BACKEND=s3` and the `S3_*` env vars (see [Environment variables](./env)).
+
+## Optional: expose a relay securely with Tailscale
+
+If you want to access your self-hosted relay from a phone or remote machine without opening inbound ports, we recommend using **Tailscale** as a sidecar and publishing the server via **Tailscale Serve**.
+
+This approach:
+
+- avoids public ingress and TLS setup
+- gives you a stable HTTPS URL inside your tailnet
+- keeps the Happier server image unprivileged (Tailscale runs in its own container)
+
+Minimal `docker-compose.yml` example (preview channel):
+
+```yaml
+services:
+  relay:
+    image: happierdev/relay-server:preview
+    environment:
+      PORT: "3005"
+      # Optional:
+      # Disable UI serving:
+      # HAPPIER_SERVER_UI_DIR: ""
+    volumes:
+      - happier-relay-data:/data
+
+  tailscale:
+    image: tailscale/tailscale:stable
+    network_mode: service:relay
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY}
+      TS_HOSTNAME: happier-relay
+      TS_STATE_DIR: /var/lib/tailscale
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    command: >
+      sh -lc '
+        tailscaled --state=${TS_STATE_DIR}/tailscaled.state &
+        sleep 2
+        tailscale up --authkey="${TS_AUTHKEY}" --hostname="${TS_HOSTNAME}" --accept-dns=false
+        tailscale serve --bg --https=443 http://127.0.0.1:3005
+        tail -f /dev/null
+      '
+
+volumes:
+  happier-relay-data:
+  tailscale-state:
+```
+
+Notes:
+
+- Use an **ephemeral**, **one-time** pre-auth key for `TS_AUTHKEY` when possible.
+- `tailscale serve` publishes the Happier UI + API (including WebSockets) behind the Tailscale HTTPS endpoint.
+- If your environment can’t use `/dev/net/tun` (some restricted hosts), fall back to a normal reverse proxy (Caddy/Traefik/nginx) or run Tailscale on the host OS and proxy to the container.
 
 ## Build images
 

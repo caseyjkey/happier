@@ -32,6 +32,19 @@ function parseBool(value, name) {
 }
 
 /**
+ * @param {string} raw
+ * @returns {string[]}
+ */
+function splitCsvLower(raw) {
+  const v = String(raw ?? '').trim();
+  if (!v) return [];
+  return v
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+/**
  * @param {string} cmd
  * @param {string[]} args
  * @param {{ dryRun?: boolean; stdio?: 'inherit' | 'pipe'; timeoutMs?: number }} [opts]
@@ -220,7 +233,7 @@ function dockerLogin(opts) {
   const username = String(process.env.DOCKERHUB_USERNAME ?? '').trim();
   const token = String(process.env.DOCKERHUB_TOKEN ?? '').trim();
   if (opts.dryRun) {
-    const printable = `docker login --username ${username || '$DOCKERHUB_USERNAME'} --password-stdin`;
+    const printable = `docker login docker.io --username ${username || '$DOCKERHUB_USERNAME'} --password-stdin`;
     console.log(`[dry-run] ${printable}`);
     return;
   }
@@ -250,6 +263,117 @@ function dockerLogin(opts) {
       ].join('\n'),
     );
   }
+}
+
+/**
+ * @returns {boolean}
+ */
+function isGithubActions() {
+  return String(process.env.GITHUB_ACTIONS ?? '')
+    .trim()
+    .toLowerCase() === 'true';
+}
+
+/**
+ * @param {string[]} args
+ * @returns {string}
+ */
+function tryGh(args) {
+  try {
+    const out = execFileSync('gh', args, {
+      env: process.env,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 10_000,
+    });
+    return String(out ?? '').trim();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * @param {{ dryRun: boolean }} opts
+ */
+function dockerLoginGhcr(opts) {
+  const registry = String(process.env.GHCR_REGISTRY ?? 'ghcr.io').trim() || 'ghcr.io';
+  const localMode = !isGithubActions();
+
+  let username = String(process.env.GHCR_USERNAME ?? process.env.GITHUB_ACTOR ?? '').trim();
+  let token = String(process.env.GHCR_TOKEN ?? process.env.GITHUB_TOKEN ?? '').trim();
+
+  if (!opts.dryRun && localMode) {
+    if (!token) token = tryGh(['auth', 'token']);
+    if (!username) username = tryGh(['api', 'user', '-q', '.login']);
+  }
+
+  if (opts.dryRun) {
+    const printable = `docker login ${registry} --username ${username || '$GHCR_USERNAME'} --password-stdin`;
+    console.log(`[dry-run] ${printable}`);
+    return;
+  }
+
+  if (!username) {
+    fail(
+      [
+        '[pipeline] missing GHCR_USERNAME (required to push GHCR images).',
+        'Fix: set GHCR_USERNAME, or authenticate with GitHub CLI locally via `gh auth login`.',
+      ].join('\n'),
+    );
+  }
+  if (!token) {
+    fail(
+      [
+        '[pipeline] missing GHCR_TOKEN (required to push GHCR images).',
+        'Fix: set GHCR_TOKEN, or authenticate with GitHub CLI locally via `gh auth login`.',
+      ].join('\n'),
+    );
+  }
+
+  console.log(`[pipeline] docker login: ${registry}`);
+  try {
+    execFileSync('docker', ['login', registry, '--username', username, '--password-stdin'], {
+      env: process.env,
+      input: `${token}\n`,
+      stdio: ['pipe', 'inherit', 'inherit'],
+      timeout: 60_000,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    fail(
+      [
+        `[pipeline] docker login failed for ${registry}.`,
+        'Fix: verify GHCR_USERNAME/GHCR_TOKEN (token needs packages:write on the repo or org).',
+        `Error: ${msg}`,
+      ].join('\n'),
+    );
+  }
+}
+
+/**
+ * @param {unknown} raw
+ * @returns {Set<'dockerhub' | 'ghcr'>}
+ */
+function resolveRegistries(raw) {
+  const fromEnv = String(process.env.PIPELINE_DOCKER_REGISTRIES ?? '').trim();
+  const v = String(raw ?? '').trim() || fromEnv || 'dockerhub';
+  const tokens = splitCsvLower(v);
+  if (tokens.length === 0) return new Set(['dockerhub']);
+
+  /** @type {Set<'dockerhub' | 'ghcr'>} */
+  const out = new Set();
+  for (const t of tokens) {
+    if (t === 'dockerhub') {
+      out.add('dockerhub');
+      continue;
+    }
+    if (t === 'ghcr') {
+      out.add('ghcr');
+      continue;
+    }
+    fail(`Unsupported docker registry token: ${t} (supported: dockerhub,ghcr)`);
+  }
+  return out;
 }
 
 /**
@@ -326,11 +450,12 @@ async function main() {
   const { values } = parseArgs({
     options: {
       channel: { type: 'string' },
+      registries: { type: 'string', default: '' },
       'source-ref': { type: 'string', default: '' },
       sha: { type: 'string', default: '' },
       'push-latest': { type: 'string', default: 'true' },
       'build-relay': { type: 'string', default: 'true' },
-      'build-devcontainer': { type: 'string', default: 'true' },
+      'build-dev-box': { type: 'string', default: 'true' },
       'dry-run': { type: 'boolean', default: false },
     },
     allowPositionals: false,
@@ -339,32 +464,47 @@ async function main() {
   const channel = String(values.channel ?? '').trim();
   if (!channel) fail('--channel is required');
 
+  const registries = resolveRegistries(values.registries);
   const { channelTag, floatTag, policyEnv } = resolveTagSpec(channel);
 
   const pushLatest = parseBool(values['push-latest'], '--push-latest');
   const buildRelay = parseBool(values['build-relay'], '--build-relay');
-  const buildDevcontainer = parseBool(values['build-devcontainer'], '--build-devcontainer');
+  const buildDevBox = parseBool(values['build-dev-box'], '--build-dev-box');
   const dryRun = values['dry-run'] === true;
 
   const shaRaw = String(values.sha ?? '').trim();
   const sha = shaRaw || run('git', ['rev-parse', 'HEAD'], { dryRun: false, stdio: 'pipe' }).trim();
   const shortSha = sha.slice(0, 12);
 
-  const relayBase = 'happierdev/relay-server';
-  const devBase = 'happierdev/dev-container';
+  const ghcrNamespaceRaw = String(process.env.GHCR_NAMESPACE ?? 'ghcr.io/happier-dev').trim();
+  const ghcrNamespace = ghcrNamespaceRaw.endsWith('/') ? ghcrNamespaceRaw.slice(0, -1) : ghcrNamespaceRaw;
+
+  /** @type {string[]} */
+  const relayBases = [];
+  /** @type {string[]} */
+  const devBases = [];
+  if (registries.has('dockerhub')) {
+    relayBases.push('happierdev/relay-server');
+    devBases.push('happierdev/dev-box');
+  }
+  if (registries.has('ghcr')) {
+    relayBases.push(`${ghcrNamespace}/relay-server`);
+    devBases.push(`${ghcrNamespace}/dev-box`);
+  }
 
   dockerPreflight({ dryRun });
-  dockerLogin({ dryRun });
+  if (registries.has('dockerhub')) dockerLogin({ dryRun });
+  if (registries.has('ghcr')) dockerLoginGhcr({ dryRun });
 
   const builder = ensureMultiarchBuilder({ dryRun });
 
   /** @type {string[]} */
-  const relayTags = [`${relayBase}:${channelTag}`, `${relayBase}:${channelTag}-${shortSha}`];
+  const relayTags = relayBases.flatMap((base) => [`${base}:${channelTag}`, `${base}:${channelTag}-${shortSha}`]);
   /** @type {string[]} */
-  const devTags = [`${devBase}:${channelTag}`, `${devBase}:${channelTag}-${shortSha}`];
+  const devTags = devBases.flatMap((base) => [`${base}:${channelTag}`, `${base}:${channelTag}-${shortSha}`]);
   if (pushLatest) {
-    relayTags.push(`${relayBase}:${floatTag}`);
-    devTags.push(`${devBase}:${floatTag}`);
+    for (const base of relayBases) relayTags.push(`${base}:${floatTag}`);
+    for (const base of devBases) devTags.push(`${base}:${floatTag}`);
   }
 
   const useGhaCache = String(process.env.GITHUB_ACTIONS ?? '').toLowerCase() === 'true';
@@ -405,19 +545,19 @@ async function main() {
     });
   }
 
-  if (buildDevcontainer) {
+  if (buildDevBox) {
     const args = [
       'buildx',
       'build',
       '--file',
-      'docker/devcontainer/Dockerfile',
+      'docker/dev-box/Dockerfile',
       '--builder',
       builder,
       '--platform',
       'linux/amd64,linux/arm64',
       '--push',
-      ...(useGhaCache ? ['--cache-from', 'type=gha,scope=devcontainer'] : []),
-      ...(useGhaCache ? ['--cache-to', 'type=gha,mode=max,scope=devcontainer'] : []),
+      ...(useGhaCache ? ['--cache-from', 'type=gha,scope=dev-box'] : []),
+      ...(useGhaCache ? ['--cache-to', 'type=gha,mode=max,scope=dev-box'] : []),
       '--label',
       `org.opencontainers.image.revision=${sha}`,
       ...devTags.flatMap((t) => ['--tag', t]),

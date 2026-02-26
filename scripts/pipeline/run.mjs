@@ -7,10 +7,41 @@ import { execFileSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { loadPipelineEnv } from './env/load-pipeline-env.mjs';
 import { loadSecrets } from './secrets/load-secrets.mjs';
+import { assertCleanWorktree } from './git/ensure-clean-worktree.mjs';
+import { computeReleaseExecutionPlan } from './release/lib/release-orchestrator.mjs';
+import { createAnsiStyle } from './cli/ansi-style.mjs';
+import { renderCommandHelp, renderPipelineHelp } from './cli/help.mjs';
 
 function fail(message) {
   console.error(message);
   process.exit(1);
+}
+
+/**
+ * @param {string[]} rawArgv
+ */
+function parseGlobalCliFlags(rawArgv) {
+  /** @type {null | boolean} */
+  let colorOverride = null;
+
+  const argv = [];
+  for (const arg of rawArgv) {
+    if (arg === '--no-color') {
+      colorOverride = false;
+      continue;
+    }
+    if (arg === '--color') {
+      colorOverride = true;
+      continue;
+    }
+    argv.push(arg);
+  }
+
+  const envNoColor = typeof process.env.NO_COLOR === 'string' && process.env.NO_COLOR.length >= 0;
+  const enabled =
+    colorOverride === true ? true : colorOverride === false ? false : Boolean(process.stdout.isTTY) && !envNoColor;
+
+  return { argv, style: createAnsiStyle({ enabled }) };
 }
 
 /**
@@ -76,6 +107,40 @@ function parseBoolString(value, name) {
 }
 
 /**
+ * Local operator escape hatch: when `--allow-dirty true` is used, we still require
+ * a clean index so pipeline-driven commits can't accidentally include staged changes.
+ *
+ * @param {{ cwd: string; allowDirty: boolean; dryRun: boolean }} opts
+ */
+function assertNoStagedChanges(opts) {
+  if (opts.dryRun) return;
+  if (!opts.allowDirty) return;
+
+  const raw = execFileSync('git', ['diff', '--cached', '--name-only'], {
+    cwd: opts.cwd,
+    env: process.env,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 10_000,
+  }).trim();
+  if (!raw) return;
+
+  throw new Error(
+    [
+      'git index has staged changes; refusing to run release steps that may create commits.',
+      'Fix: unstage changes or commit them separately before running the release pipeline.',
+      '',
+      raw
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((p) => `- ${p}`)
+        .join('\n'),
+    ].join('\n'),
+  );
+}
+
+/**
  * @param {unknown} value
  * @param {string} name
  * @param {boolean} autoValue
@@ -84,6 +149,100 @@ function resolveAutoBool(value, name, autoValue) {
   const raw = String(value ?? '').trim().toLowerCase();
   if (!raw || raw === 'auto') return autoValue;
   return parseBoolString(raw, name);
+}
+
+/**
+ * Split wrapper flags (owned by run.mjs) from passthrough args for wrapped scripts.
+ * We intentionally avoid node:util parseArgs here because with strict=false it treats unknown flags as booleans,
+ * consuming their values and breaking passthrough (e.g. `--channel preview` becomes `channel=true` + positional `preview`).
+ *
+ * @param {string[]} argv
+ * @returns {{
+ *   deployEnvironment: 'production' | 'preview';
+ *   dryRun: boolean;
+ *   secretsSource: 'auto' | 'env' | 'keychain';
+ *   keychainService: string;
+ *   keychainAccount: string;
+ *   passthrough: string[];
+ * }}
+ */
+function splitWrappedReleaseArgs(argv) {
+  /** @type {'production' | 'preview'} */
+  let deployEnvironment = 'production';
+  let dryRun = false;
+  /** @type {'auto' | 'env' | 'keychain'} */
+  let secretsSource = 'auto';
+  let keychainService = 'happier/pipeline';
+  let keychainAccount = '';
+
+  /** @type {string[]} */
+  const passthrough = [];
+
+  const takeValue = (arg, i) => {
+    if (arg.includes('=')) {
+      const idx = arg.indexOf('=');
+      return { value: arg.slice(idx + 1), nextIndex: i };
+    }
+    const next = argv[i + 1];
+    if (next == null) {
+      fail(`Missing value for ${arg}`);
+    }
+    return { value: next, nextIndex: i + 1 };
+  };
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = String(argv[i] ?? '');
+
+    if (arg === '--dry-run') {
+      dryRun = true;
+      continue;
+    }
+    if (arg.startsWith('--dry-run=')) {
+      const { value } = takeValue(arg, i);
+      dryRun = parseBoolString(value, '--dry-run');
+      continue;
+    }
+
+    if (arg === '--deploy-environment' || arg.startsWith('--deploy-environment=')) {
+      const { value, nextIndex } = takeValue(arg, i);
+      i = nextIndex;
+      const v = String(value ?? '').trim();
+      if (!isDeployEnvironment(v)) {
+        fail(`--deploy-environment must be 'production' or 'preview' (got: ${v || '<empty>'})`);
+      }
+      deployEnvironment = v;
+      continue;
+    }
+
+    if (arg === '--secrets-source' || arg.startsWith('--secrets-source=')) {
+      const { value, nextIndex } = takeValue(arg, i);
+      i = nextIndex;
+      const raw = String(value ?? '').trim();
+      if (raw === 'auto' || raw === 'env' || raw === 'keychain') {
+        secretsSource = raw;
+        continue;
+      }
+      fail(`--secrets-source must be 'auto', 'env', or 'keychain' (got: ${raw})`);
+    }
+
+    if (arg === '--keychain-service' || arg.startsWith('--keychain-service=')) {
+      const { value, nextIndex } = takeValue(arg, i);
+      i = nextIndex;
+      keychainService = String(value ?? '').trim() || 'happier/pipeline';
+      continue;
+    }
+
+    if (arg === '--keychain-account' || arg.startsWith('--keychain-account=')) {
+      const { value, nextIndex } = takeValue(arg, i);
+      i = nextIndex;
+      keychainAccount = String(value ?? '').trim();
+      continue;
+    }
+
+    passthrough.push(arg);
+  }
+
+  return { deployEnvironment, dryRun, secretsSource, keychainService, keychainAccount, passthrough };
 }
 
 function repoRootFromHere() {
@@ -142,8 +301,104 @@ function runNpmReleasePackages({ repoRoot, env, args, dryRun }) {
 /**
  * @param {{ repoRoot: string; env: Record<string, string>; args: string[]; dryRun: boolean }} opts
  */
+function runNpmSetPreviewVersions({ repoRoot, env, args, dryRun }) {
+  const scriptPath = path.join(repoRoot, 'scripts', 'pipeline', 'npm', 'set-preview-versions.mjs');
+  const fullArgs = [scriptPath, ...args];
+  if (dryRun) {
+    console.log(`[pipeline] exec: node ${fullArgs.map((a) => JSON.stringify(a)).join(' ')}`);
+  }
+  execFileSync(process.execPath, fullArgs, {
+    cwd: repoRoot,
+    env,
+    stdio: 'inherit',
+  });
+}
+
+/**
+ * @param {{ repoRoot: string; env: Record<string, string>; args: string[]; dryRun: boolean }} opts
+ */
 function runPublishUiWeb({ repoRoot, env, args, dryRun }) {
   const scriptPath = path.join(repoRoot, 'scripts', 'pipeline', 'release', 'publish-ui-web.mjs');
+  const fullArgs = [scriptPath, ...args];
+  if (dryRun) {
+    console.log(`[pipeline] exec: node ${fullArgs.map((a) => JSON.stringify(a)).join(' ')}`);
+  }
+  execFileSync(process.execPath, fullArgs, {
+    cwd: repoRoot,
+    env,
+    stdio: 'inherit',
+  });
+}
+
+/**
+ * @param {{ repoRoot: string; env: Record<string, string>; args: string[]; dryRun: boolean }} opts
+ */
+function runPublishCliBinaries({ repoRoot, env, args, dryRun }) {
+  const scriptPath = path.join(repoRoot, 'scripts', 'pipeline', 'release', 'publish-cli-binaries.mjs');
+  const fullArgs = [scriptPath, ...args];
+  if (dryRun) {
+    console.log(`[pipeline] exec: node ${fullArgs.map((a) => JSON.stringify(a)).join(' ')}`);
+  }
+  execFileSync(process.execPath, fullArgs, {
+    cwd: repoRoot,
+    env,
+    stdio: 'inherit',
+  });
+}
+
+/**
+ * @param {{ repoRoot: string; env: Record<string, string>; args: string[]; dryRun: boolean }} opts
+ */
+function runPublishHstackBinaries({ repoRoot, env, args, dryRun }) {
+  const scriptPath = path.join(repoRoot, 'scripts', 'pipeline', 'release', 'publish-hstack-binaries.mjs');
+  const fullArgs = [scriptPath, ...args];
+  if (dryRun) {
+    console.log(`[pipeline] exec: node ${fullArgs.map((a) => JSON.stringify(a)).join(' ')}`);
+  }
+  execFileSync(process.execPath, fullArgs, {
+    cwd: repoRoot,
+    env,
+    stdio: 'inherit',
+  });
+}
+
+/**
+ * @param {{ repoRoot: string; env: Record<string, string>; args: string[]; dryRun: boolean }} opts
+ */
+function runChecksPlan({ repoRoot, env, args, dryRun }) {
+  const scriptPath = path.join(repoRoot, 'scripts', 'pipeline', 'checks', 'resolve-checks-plan.mjs');
+  const fullArgs = [scriptPath, ...args];
+  if (dryRun) {
+    console.log(`[pipeline] exec: node ${fullArgs.map((a) => JSON.stringify(a)).join(' ')}`);
+  }
+  execFileSync(process.execPath, fullArgs, {
+    cwd: repoRoot,
+    env,
+    stdio: 'inherit',
+  });
+}
+
+/**
+ * @param {{ repoRoot: string; env: Record<string, string>; args: string[]; dryRun: boolean }} opts
+ */
+function runChecks({ repoRoot, env, args, dryRun }) {
+  const scriptPath = path.join(repoRoot, 'scripts', 'pipeline', 'checks', 'run-checks.mjs');
+  const fullArgs = [scriptPath, ...args];
+  if (dryRun) {
+    console.log(`[pipeline] exec: node ${fullArgs.map((a) => JSON.stringify(a)).join(' ')}`);
+  }
+  execFileSync(process.execPath, fullArgs, {
+    cwd: repoRoot,
+    env,
+    stdio: 'inherit',
+  });
+}
+
+/**
+ * @param {{ repoRoot: string; env: Record<string, string>; args: string[]; dryRun: boolean }} opts
+ */
+function runSmokeCli({ repoRoot, env, args, dryRun }) {
+  const scriptPath = path.join(repoRoot, 'scripts', 'pipeline', 'smoke', 'cli-smoke.mjs');
   const fullArgs = [scriptPath, ...args];
   if (dryRun) {
     console.log(`[pipeline] exec: node ${fullArgs.map((a) => JSON.stringify(a)).join(' ')}`);
@@ -318,6 +573,87 @@ function runTauriPreparePublishAssets({ repoRoot, env, args, dryRun }) {
 /**
  * @param {{ repoRoot: string; env: Record<string, string>; args: string[]; dryRun: boolean }} opts
  */
+function runTauriValidateUpdaterPubkey({ repoRoot, env, args, dryRun }) {
+  const scriptPath = path.join(repoRoot, 'scripts', 'pipeline', 'tauri', 'validate-updater-pubkey.mjs');
+  const fullArgs = [scriptPath, ...args];
+  if (dryRun) {
+    console.log(`[pipeline] exec: node ${fullArgs.map((a) => JSON.stringify(a)).join(' ')}`);
+  }
+  execFileSync(process.execPath, fullArgs, {
+    cwd: repoRoot,
+    env,
+    stdio: 'inherit',
+  });
+}
+
+/**
+ * @param {{ repoRoot: string; env: Record<string, string>; args: string[]; dryRun: boolean }} opts
+ */
+function runTauriBuildUpdaterArtifacts({ repoRoot, env, args, dryRun }) {
+  const scriptPath = path.join(repoRoot, 'scripts', 'pipeline', 'tauri', 'build-updater-artifacts.mjs');
+  const fullArgs = [scriptPath, ...args];
+  if (dryRun) {
+    console.log(`[pipeline] exec: node ${fullArgs.map((a) => JSON.stringify(a)).join(' ')}`);
+  }
+  execFileSync(process.execPath, fullArgs, {
+    cwd: repoRoot,
+    env,
+    stdio: 'inherit',
+  });
+}
+
+/**
+ * @param {{ repoRoot: string; env: Record<string, string>; args: string[]; dryRun: boolean }} opts
+ */
+function runTauriNotarizeMacosArtifacts({ repoRoot, env, args, dryRun }) {
+  const scriptPath = path.join(repoRoot, 'scripts', 'pipeline', 'tauri', 'notarize-macos-artifacts.mjs');
+  const fullArgs = [scriptPath, ...args];
+  if (dryRun) {
+    console.log(`[pipeline] exec: node ${fullArgs.map((a) => JSON.stringify(a)).join(' ')}`);
+  }
+  execFileSync(process.execPath, fullArgs, {
+    cwd: repoRoot,
+    env,
+    stdio: 'inherit',
+  });
+}
+
+/**
+ * @param {{ repoRoot: string; env: Record<string, string>; args: string[]; dryRun: boolean }} opts
+ */
+function runTauriCollectUpdaterArtifacts({ repoRoot, env, args, dryRun }) {
+  const scriptPath = path.join(repoRoot, 'scripts', 'pipeline', 'tauri', 'collect-updater-artifacts.mjs');
+  const fullArgs = [scriptPath, ...args];
+  if (dryRun) {
+    console.log(`[pipeline] exec: node ${fullArgs.map((a) => JSON.stringify(a)).join(' ')}`);
+  }
+  execFileSync(process.execPath, fullArgs, {
+    cwd: repoRoot,
+    env,
+    stdio: 'inherit',
+  });
+}
+
+/**
+ * @param {{ repoRoot: string; env: Record<string, string>; args: string[]; dryRun: boolean }} opts
+ */
+function runTestingCreateAuthCredentials({ repoRoot, env, args, dryRun }) {
+  const scriptPath = path.join(repoRoot, 'scripts', 'pipeline', 'testing', 'create-auth-credentials.mjs');
+  const fullArgs = [scriptPath, ...args];
+  if (dryRun) {
+    console.log(`[pipeline] exec: node ${fullArgs.map((a) => JSON.stringify(a)).join(' ')}`);
+    return;
+  }
+  execFileSync(process.execPath, fullArgs, {
+    cwd: repoRoot,
+    env,
+    stdio: 'inherit',
+  });
+}
+
+/**
+ * @param {{ repoRoot: string; env: Record<string, string>; args: string[]; dryRun: boolean }} opts
+ */
 function runDockerPublishImages({ repoRoot, env, args, dryRun }) {
   const scriptPath = path.join(repoRoot, 'scripts', 'pipeline', 'docker', 'publish-images.mjs');
   const fullArgs = [scriptPath, ...args];
@@ -336,6 +672,38 @@ function runDockerPublishImages({ repoRoot, env, args, dryRun }) {
  */
 function runGithubPublishRelease({ repoRoot, env, args, dryRun }) {
   const scriptPath = path.join(repoRoot, 'scripts', 'pipeline', 'github', 'publish-release.mjs');
+  const fullArgs = [scriptPath, ...args];
+  if (dryRun) {
+    console.log(`[pipeline] exec: node ${fullArgs.map((a) => JSON.stringify(a)).join(' ')}`);
+  }
+  execFileSync(process.execPath, fullArgs, {
+    cwd: repoRoot,
+    env,
+    stdio: 'inherit',
+  });
+}
+
+/**
+ * @param {{ repoRoot: string; env: Record<string, string>; args: string[]; dryRun: boolean }} opts
+ */
+function runGithubAuditReleaseAssets({ repoRoot, env, args, dryRun }) {
+  const scriptPath = path.join(repoRoot, 'scripts', 'pipeline', 'github', 'audit-release-assets.mjs');
+  const fullArgs = [scriptPath, ...args];
+  if (dryRun) {
+    console.log(`[pipeline] exec: node ${fullArgs.map((a) => JSON.stringify(a)).join(' ')}`);
+  }
+  execFileSync(process.execPath, fullArgs, {
+    cwd: repoRoot,
+    env,
+    stdio: 'inherit',
+  });
+}
+
+/**
+ * @param {{ repoRoot: string; env: Record<string, string>; args: string[]; dryRun: boolean }} opts
+ */
+function runGithubCommitAndPush({ repoRoot, env, args, dryRun }) {
+  const scriptPath = path.join(repoRoot, 'scripts', 'pipeline', 'github', 'commit-and-push.mjs');
   const fullArgs = [scriptPath, ...args];
   if (dryRun) {
     console.log(`[pipeline] exec: node ${fullArgs.map((a) => JSON.stringify(a)).join(' ')}`);
@@ -403,58 +771,228 @@ function runReleaseWrappedScript({ repoRoot, env, scriptFile, args, dryRun, skip
   });
 }
 
+/**
+ * @param {{ repoRoot: string; env: Record<string, string>; scriptRel: string; args: string[] }} opts
+ */
+function runJsonScript({ repoRoot, env, scriptRel, args }) {
+  const out = execFileSync(process.execPath, [path.join(repoRoot, scriptRel), ...args], {
+    cwd: repoRoot,
+    env,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 120_000,
+  }).trim();
+
+  try {
+    return out ? JSON.parse(out) : {};
+  } catch (err) {
+    throw new Error(
+      [
+        `Expected JSON output from: node ${scriptRel} ${args.map((a) => JSON.stringify(a)).join(' ')}`,
+        '',
+        String(err),
+        '',
+        'Raw:',
+        out,
+      ].join('\n'),
+    );
+  }
+}
+
 function main() {
   const repoRoot = repoRootFromHere();
 
-  const [subcommandRaw, ...rest] = process.argv.slice(2);
+  const { argv, style } = parseGlobalCliFlags(process.argv.slice(2));
+  const [subcommandRaw, ...rest] = argv;
   const subcommand = String(subcommandRaw ?? '').trim();
-	  if (!subcommand) {
-	    fail(
-	      'Usage: node scripts/pipeline/run.mjs <deploy|npm-publish|npm-release|publish-ui-web|publish-server-runtime|release-bump-plan|release-bump-versions-dev|release-sync-installers|release-bump-version|release-build-cli-binaries|release-build-hstack-binaries|release-build-server-binaries|release-publish-manifests|release-verify-artifacts|release-compute-changed-components|release-resolve-bump-plan|release-compute-deploy-plan|release-build-ui-web-bundle|expo-ota|expo-native-build|expo-download-apk|expo-mobile-meta|expo-submit|expo-publish-apk-release|ui-mobile-release|tauri-prepare-assets|docker-publish|github-publish-release|promote-branch|promote-deploy-branch|release> [args...]',
-	    );
-	  }
 
-  if (
-    subcommand !== 'deploy' &&
-    subcommand !== 'npm-publish' &&
-    subcommand !== 'npm-release' &&
-    subcommand !== 'publish-ui-web' &&
-	    subcommand !== 'publish-server-runtime' &&
-	    subcommand !== 'release-bump-plan' &&
-	    subcommand !== 'release-bump-versions-dev' &&
-	    subcommand !== 'release-sync-installers' &&
-	    subcommand !== 'release-bump-version' &&
-	    subcommand !== 'release-build-cli-binaries' &&
-	    subcommand !== 'release-build-hstack-binaries' &&
-	    subcommand !== 'release-build-server-binaries' &&
-	    subcommand !== 'release-publish-manifests' &&
-	    subcommand !== 'release-verify-artifacts' &&
-	    subcommand !== 'release-compute-changed-components' &&
-	    subcommand !== 'release-resolve-bump-plan' &&
-	    subcommand !== 'release-compute-deploy-plan' &&
-	    subcommand !== 'release-build-ui-web-bundle' &&
-	    subcommand !== 'expo-ota' &&
-	    subcommand !== 'expo-native-build' &&
-	    subcommand !== 'expo-download-apk' &&
-    subcommand !== 'expo-mobile-meta' &&
-    subcommand !== 'expo-submit' &&
-    subcommand !== 'expo-publish-apk-release' &&
-    subcommand !== 'ui-mobile-release' &&
-    subcommand !== 'tauri-prepare-assets' &&
-    subcommand !== 'docker-publish' &&
-    subcommand !== 'github-publish-release' &&
-    subcommand !== 'promote-branch' &&
-    subcommand !== 'promote-deploy-branch' &&
-    subcommand !== 'release'
-  ) {
-    fail(`Unsupported subcommand: ${subcommand}`);
+  const wantsGlobalHelp = subcommand === '--help' || subcommand === '-h' || subcommand === 'help';
+  if (wantsGlobalHelp) {
+    const target = subcommand === 'help' ? String(rest[0] ?? '').trim() : '';
+    const out = target ? renderCommandHelp({ style, command: target, cliRelPath: 'scripts/pipeline/run.mjs' }) : renderPipelineHelp({ style, cliRelPath: 'scripts/pipeline/run.mjs' });
+    process.stdout.write(out);
+    process.exit(0);
   }
 
-  if (subcommand === 'deploy') {
-    const { values } = parseArgs({
-      args: rest,
-      options: {
-        'deploy-environment': { type: 'string', default: 'production' },
+  const wantsCommandHelp = rest.includes('--help') || rest.includes('-h');
+  if (subcommand && wantsCommandHelp) {
+    const out = renderCommandHelp({ style, command: subcommand, cliRelPath: 'scripts/pipeline/run.mjs' });
+    process.stdout.write(out);
+    process.exit(0);
+  }
+
+  if (!subcommand) {
+    fail(
+      [
+        'Missing command.',
+        '',
+        'Run:',
+        '  node scripts/pipeline/run.mjs --help',
+      ].join('\n'),
+    );
+  }
+
+			  if (
+				    subcommand !== 'deploy' &&
+			    subcommand !== 'npm-publish' &&
+				    subcommand !== 'npm-release' &&
+			    subcommand !== 'npm-set-preview-versions' &&
+			    subcommand !== 'publish-ui-web' &&
+			    subcommand !== 'publish-cli-binaries' &&
+			    subcommand !== 'publish-hstack-binaries' &&
+				    subcommand !== 'publish-server-runtime' &&
+			    subcommand !== 'checks-plan' &&
+			    subcommand !== 'checks' &&
+			    subcommand !== 'smoke-cli' &&
+				    subcommand !== 'release-bump-plan' &&
+				    subcommand !== 'release-bump-versions-dev' &&
+				    subcommand !== 'release-sync-installers' &&
+			    subcommand !== 'release-bump-version' &&
+			    subcommand !== 'release-build-cli-binaries' &&
+		    subcommand !== 'release-build-hstack-binaries' &&
+		    subcommand !== 'release-build-server-binaries' &&
+		    subcommand !== 'release-publish-manifests' &&
+		    subcommand !== 'release-verify-artifacts' &&
+		    subcommand !== 'release-compute-changed-components' &&
+		    subcommand !== 'release-resolve-bump-plan' &&
+		    subcommand !== 'release-compute-deploy-plan' &&
+		    subcommand !== 'release-build-ui-web-bundle' &&
+		    subcommand !== 'expo-ota' &&
+		    subcommand !== 'expo-native-build' &&
+		    subcommand !== 'expo-download-apk' &&
+	    subcommand !== 'expo-mobile-meta' &&
+	    subcommand !== 'expo-submit' &&
+	    subcommand !== 'expo-publish-apk-release' &&
+	    subcommand !== 'ui-mobile-release' &&
+	    subcommand !== 'tauri-prepare-assets' &&
+	    subcommand !== 'tauri-validate-updater-pubkey' &&
+	    subcommand !== 'tauri-build-updater-artifacts' &&
+	    subcommand !== 'tauri-notarize-macos-artifacts' &&
+	    subcommand !== 'tauri-collect-updater-artifacts' &&
+	    subcommand !== 'testing-create-auth-credentials' &&
+		    subcommand !== 'docker-publish' &&
+		    subcommand !== 'github-publish-release' &&
+		    subcommand !== 'github-audit-release-assets' &&
+		    subcommand !== 'github-commit-and-push' &&
+		    subcommand !== 'promote-branch' &&
+			    subcommand !== 'promote-deploy-branch' &&
+			    subcommand !== 'release'
+			  ) {
+				    fail(
+              [
+                `Unsupported subcommand: ${subcommand}`,
+                '',
+                'Run:',
+                '  node scripts/pipeline/run.mjs --help',
+              ].join('\n'),
+            );
+				  }
+
+			  if (subcommand === 'smoke-cli') {
+			    const { values } = parseArgs({
+			      args: rest,
+			      options: {
+	        'package-dir': { type: 'string', default: 'apps/cli' },
+	        'workspace-name': { type: 'string', default: '@happier-dev/cli' },
+	        'skip-build': { type: 'string', default: 'false' },
+	        'dry-run': { type: 'boolean', default: false },
+	      },
+	      allowPositionals: false,
+	    });
+
+	    const pkgDir = String(values['package-dir'] ?? '').trim() || 'apps/cli';
+	    const workspaceName = String(values['workspace-name'] ?? '').trim() || '@happier-dev/cli';
+	    const skipBuild = String(values['skip-build'] ?? '').trim() || 'false';
+	    const dryRun = values['dry-run'] === true;
+
+	    runSmokeCli({
+	      repoRoot,
+	      env: { ...process.env },
+	      dryRun,
+	      args: [
+	        '--package-dir',
+	        pkgDir,
+	        '--workspace-name',
+	        workspaceName,
+	        '--skip-build',
+	        skipBuild,
+	        ...(dryRun ? ['--dry-run'] : []),
+	      ],
+	    });
+	    return;
+	  }
+
+	  if (subcommand === 'checks-plan') {
+	    const { values } = parseArgs({
+	      args: rest,
+	      options: {
+	        profile: { type: 'string' },
+	        'custom-checks': { type: 'string', default: '' },
+	        'github-output': { type: 'string', default: '' },
+	        'dry-run': { type: 'boolean', default: false },
+	      },
+	      allowPositionals: false,
+	    });
+
+	    const profile = String(values.profile ?? '').trim();
+	    if (!profile) fail('--profile is required (full|fast|none|custom)');
+	    const customChecks = String(values['custom-checks'] ?? '').trim();
+	    const githubOutput = String(values['github-output'] ?? '').trim();
+	    const dryRun = values['dry-run'] === true;
+
+	    runChecksPlan({
+	      repoRoot,
+	      env: { ...process.env },
+	      dryRun,
+	      args: [
+	        '--profile',
+	        profile,
+	        ...(customChecks ? ['--custom-checks', customChecks] : []),
+	        ...(githubOutput ? ['--github-output', githubOutput] : []),
+	      ],
+	    });
+	    return;
+	  }
+
+	  if (subcommand === 'checks') {
+	    const { values } = parseArgs({
+	      args: rest,
+	      options: {
+	        profile: { type: 'string' },
+	        'custom-checks': { type: 'string', default: '' },
+	        'install-deps': { type: 'string', default: 'auto' },
+	        'dry-run': { type: 'boolean', default: false },
+	      },
+	      allowPositionals: false,
+	    });
+
+	    const profile = String(values.profile ?? '').trim();
+	    if (!profile) fail('--profile is required (full|fast|none|custom)');
+	    const customChecks = String(values['custom-checks'] ?? '').trim();
+	    const installDeps = String(values['install-deps'] ?? '').trim();
+	    const dryRun = values['dry-run'] === true;
+
+	    runChecks({
+	      repoRoot,
+	      env: { ...process.env, HAPPIER_UI_VENDOR_WEB_ASSETS: process.env.HAPPIER_UI_VENDOR_WEB_ASSETS ?? '0' },
+	      dryRun,
+	      args: [
+	        '--profile',
+	        profile,
+	        ...(customChecks ? ['--custom-checks', customChecks] : []),
+	        '--install-deps',
+	        installDeps || 'auto',
+	        ...(dryRun ? ['--dry-run'] : []),
+	      ],
+	    });
+	    return;
+	  }
+
+	  if (subcommand === 'deploy') {
+	    const { values } = parseArgs({
+	      args: rest,
+	      options: {
+	        'deploy-environment': { type: 'string', default: 'production' },
         component: { type: 'string' },
         repository: { type: 'string', default: '' },
         'ref-name': { type: 'string', default: '' },
@@ -534,19 +1072,63 @@ function main() {
     return;
   }
 
-  if (subcommand === 'npm-publish') {
+  if (subcommand === 'npm-set-preview-versions') {
     const { values } = parseArgs({
       args: rest,
       options: {
-        channel: { type: 'string' },
-        tag: { type: 'string', default: '' },
-        tarball: { type: 'string', default: '' },
-        'tarball-dir': { type: 'string', default: '' },
-        'dry-run': { type: 'boolean', default: false },
-        'secrets-source': { type: 'string', default: 'auto' },
-        'keychain-service': { type: 'string', default: 'happier/pipeline' },
-        'keychain-account': { type: 'string', default: '' },
+        'repo-root': { type: 'string', default: '' },
+        'publish-cli': { type: 'string', default: 'false' },
+        'publish-stack': { type: 'string', default: 'false' },
+        'publish-server': { type: 'string', default: 'false' },
+        'server-runner-dir': { type: 'string', default: 'packages/relay-server' },
+        write: { type: 'string', default: 'true' },
       },
+      allowPositionals: false,
+    });
+
+    const repoRootOverride = String(values['repo-root'] ?? '').trim();
+    const publishCli = String(values['publish-cli'] ?? '').trim() || 'false';
+    const publishStack = String(values['publish-stack'] ?? '').trim() || 'false';
+    const publishServer = String(values['publish-server'] ?? '').trim() || 'false';
+    const serverRunnerDir = String(values['server-runner-dir'] ?? '').trim() || 'packages/relay-server';
+    const write = String(values.write ?? '').trim() || 'true';
+
+    runNpmSetPreviewVersions({
+      repoRoot,
+      env: { ...process.env },
+      dryRun: false,
+      args: [
+        ...(repoRootOverride ? ['--repo-root', repoRootOverride] : []),
+        '--publish-cli',
+        publishCli,
+        '--publish-stack',
+        publishStack,
+        '--publish-server',
+        publishServer,
+        '--server-runner-dir',
+        serverRunnerDir,
+        '--write',
+        write,
+      ],
+    });
+
+    return;
+  }
+
+	  if (subcommand === 'npm-publish') {
+	    const { values } = parseArgs({
+	      args: rest,
+	      options: {
+	        channel: { type: 'string' },
+	        tag: { type: 'string', default: '' },
+	        tarball: { type: 'string', default: '' },
+	        'tarball-dir': { type: 'string', default: '' },
+	        'allow-dirty': { type: 'string', default: 'false' },
+	        'dry-run': { type: 'boolean', default: false },
+	        'secrets-source': { type: 'string', default: 'auto' },
+	        'keychain-service': { type: 'string', default: 'happier/pipeline' },
+	        'keychain-account': { type: 'string', default: '' },
+	      },
       allowPositionals: false,
     });
 
@@ -581,12 +1163,14 @@ function main() {
       console.log(`[pipeline] loaded secrets from Keychain service '${keychainService}'`);
     }
 
-    const tarball = String(values.tarball ?? '').trim();
-    const tarballDir = String(values['tarball-dir'] ?? '').trim();
-    const tag = String(values.tag ?? '').trim();
-    const dryRun = values['dry-run'] === true;
+	    const tarball = String(values.tarball ?? '').trim();
+	    const tarballDir = String(values['tarball-dir'] ?? '').trim();
+	    const tag = String(values.tag ?? '').trim();
+	    const allowDirty = parseBoolString(values['allow-dirty'], '--allow-dirty');
+	    const dryRun = values['dry-run'] === true;
+	    if (!dryRun) assertCleanWorktree({ cwd: repoRoot, allowDirty });
 
-    console.log(`[pipeline] npm publish: channel=${channel}`);
+	    console.log(`[pipeline] npm publish: channel=${channel}`);
 
     runNpmPublishTarball({
       repoRoot,
@@ -605,22 +1189,23 @@ function main() {
     return;
   }
 
-  if (subcommand === 'npm-release') {
-    const { values } = parseArgs({
-      args: rest,
-      options: {
-        channel: { type: 'string' },
-        'publish-cli': { type: 'string', default: 'false' },
-        'publish-stack': { type: 'string', default: 'false' },
-        'publish-server': { type: 'string', default: 'false' },
-        'server-runner-dir': { type: 'string', default: 'packages/relay-server' },
-        'run-tests': { type: 'string', default: 'true' },
-        mode: { type: 'string', default: 'pack+publish' },
-        'dry-run': { type: 'boolean', default: false },
-        'secrets-source': { type: 'string', default: 'auto' },
-        'keychain-service': { type: 'string', default: 'happier/pipeline' },
-        'keychain-account': { type: 'string', default: '' },
-      },
+	  if (subcommand === 'npm-release') {
+	    const { values } = parseArgs({
+	      args: rest,
+	      options: {
+	        channel: { type: 'string' },
+	        'publish-cli': { type: 'string', default: 'false' },
+	        'publish-stack': { type: 'string', default: 'false' },
+	        'publish-server': { type: 'string', default: 'false' },
+	        'server-runner-dir': { type: 'string', default: 'packages/relay-server' },
+	        'run-tests': { type: 'string', default: 'auto' },
+	        mode: { type: 'string', default: 'pack+publish' },
+	        'allow-dirty': { type: 'string', default: 'false' },
+	        'dry-run': { type: 'boolean', default: false },
+	        'secrets-source': { type: 'string', default: 'auto' },
+	        'keychain-service': { type: 'string', default: 'happier/pipeline' },
+	        'keychain-account': { type: 'string', default: '' },
+	      },
       allowPositionals: false,
     });
 
@@ -658,12 +1243,14 @@ function main() {
     const publishCli = String(values['publish-cli'] ?? '').trim();
     const publishStack = String(values['publish-stack'] ?? '').trim();
     const publishServer = String(values['publish-server'] ?? '').trim();
-    const runnerDir = String(values['server-runner-dir'] ?? '').trim();
-    const runTests = String(values['run-tests'] ?? '').trim();
-    const mode = String(values.mode ?? '').trim();
-    const dryRun = values['dry-run'] === true;
+	    const runnerDir = String(values['server-runner-dir'] ?? '').trim();
+	    const runTests = String(values['run-tests'] ?? '').trim();
+	    const mode = String(values.mode ?? '').trim();
+	    const allowDirty = parseBoolString(values['allow-dirty'], '--allow-dirty');
+	    const dryRun = values['dry-run'] === true;
+	    if (!dryRun) assertCleanWorktree({ cwd: repoRoot, allowDirty });
 
-    console.log(`[pipeline] npm release: channel=${channel}`);
+	    console.log(`[pipeline] npm release: channel=${channel}`);
 
     runNpmReleasePackages({
       repoRoot,
@@ -685,20 +1272,21 @@ function main() {
     return;
   }
 
-  if (subcommand === 'publish-ui-web') {
-    const { values } = parseArgs({
-      args: rest,
-      options: {
-        channel: { type: 'string' },
-        'allow-stable': { type: 'string', default: 'false' },
-        'release-message': { type: 'string', default: '' },
-        'run-contracts': { type: 'string', default: 'true' },
-        'check-installers': { type: 'string', default: 'true' },
-        'dry-run': { type: 'boolean', default: false },
-        'secrets-source': { type: 'string', default: 'auto' },
-        'keychain-service': { type: 'string', default: 'happier/pipeline' },
-        'keychain-account': { type: 'string', default: '' },
-      },
+		  if (subcommand === 'publish-ui-web') {
+		    const { values } = parseArgs({
+		      args: rest,
+		      options: {
+		        channel: { type: 'string' },
+	        'allow-stable': { type: 'string', default: 'false' },
+	        'release-message': { type: 'string', default: '' },
+	        'run-contracts': { type: 'string', default: 'auto' },
+	        'check-installers': { type: 'string', default: 'true' },
+	        'allow-dirty': { type: 'string', default: 'false' },
+	        'dry-run': { type: 'boolean', default: false },
+	        'secrets-source': { type: 'string', default: 'auto' },
+	        'keychain-service': { type: 'string', default: 'happier/pipeline' },
+	        'keychain-account': { type: 'string', default: '' },
+	      },
       allowPositionals: false,
     });
 
@@ -733,15 +1321,17 @@ function main() {
       console.log(`[pipeline] loaded secrets from Keychain service '${keychainService}'`);
     }
 
-    const allowStable = String(values['allow-stable'] ?? '').trim();
-    const releaseMessage = String(values['release-message'] ?? '').trim();
-    const runContracts = String(values['run-contracts'] ?? '').trim();
-    const checkInstallers = String(values['check-installers'] ?? '').trim();
-    const dryRun = values['dry-run'] === true;
+	    const allowStable = String(values['allow-stable'] ?? '').trim();
+	    const releaseMessage = String(values['release-message'] ?? '').trim();
+	    const runContracts = String(values['run-contracts'] ?? '').trim();
+	    const checkInstallers = String(values['check-installers'] ?? '').trim();
+	    const allowDirty = parseBoolString(values['allow-dirty'], '--allow-dirty');
+	    const dryRun = values['dry-run'] === true;
+	    if (!dryRun) assertCleanWorktree({ cwd: repoRoot, allowDirty });
 
-    runPublishUiWeb({
-      repoRoot,
-      env: mergedEnv,
+	    runPublishUiWeb({
+	      repoRoot,
+	      env: mergedEnv,
       dryRun,
       args: [
         '--channel',
@@ -751,30 +1341,189 @@ function main() {
         '--release-message',
         releaseMessage,
         '--run-contracts',
-        runContracts || 'true',
+        runContracts || 'auto',
         '--check-installers',
         checkInstallers || 'true',
         ...(dryRun ? ['--dry-run'] : []),
       ],
     });
 
-    return;
-  }
+	    return;
+	  }
 
-  if (subcommand === 'publish-server-runtime') {
-    const { values } = parseArgs({
-      args: rest,
-      options: {
-        channel: { type: 'string' },
-        'allow-stable': { type: 'string', default: 'false' },
-        'release-message': { type: 'string', default: '' },
-        'run-contracts': { type: 'string', default: 'true' },
-        'check-installers': { type: 'string', default: 'true' },
-        'dry-run': { type: 'boolean', default: false },
-        'secrets-source': { type: 'string', default: 'auto' },
-        'keychain-service': { type: 'string', default: 'happier/pipeline' },
-        'keychain-account': { type: 'string', default: '' },
-      },
+		  if (subcommand === 'publish-cli-binaries') {
+		    const { values } = parseArgs({
+		      args: rest,
+		      options: {
+		        channel: { type: 'string' },
+		        'allow-stable': { type: 'string', default: 'false' },
+		        'release-message': { type: 'string', default: '' },
+		        'run-contracts': { type: 'string', default: 'auto' },
+		        'check-installers': { type: 'string', default: 'true' },
+		        'allow-dirty': { type: 'string', default: 'false' },
+		        'dry-run': { type: 'boolean', default: false },
+		        'secrets-source': { type: 'string', default: 'auto' },
+		        'keychain-service': { type: 'string', default: 'happier/pipeline' },
+		        'keychain-account': { type: 'string', default: '' },
+		      },
+	      allowPositionals: false,
+	    });
+
+	    const channel = String(values.channel ?? '').trim();
+	    if (!isRollingReleaseChannel(channel)) {
+	      fail(`--channel must be 'stable' or 'preview' (got: ${channel || '<empty>'})`);
+	    }
+
+	    const { env, sources } = loadPipelineEnv({ repoRoot });
+	    const secretsSourceRaw = String(values['secrets-source'] ?? '').trim();
+	    const secretsSource =
+	      secretsSourceRaw === 'auto' || secretsSourceRaw === 'env' || secretsSourceRaw === 'keychain'
+	        ? secretsSourceRaw
+	        : 'auto';
+	    if (secretsSourceRaw && secretsSource !== secretsSourceRaw) {
+	      fail(`--secrets-source must be 'auto', 'env', or 'keychain' (got: ${secretsSourceRaw})`);
+	    }
+
+	    const keychainService = String(values['keychain-service'] ?? '').trim() || 'happier/pipeline';
+	    const keychainAccount = String(values['keychain-account'] ?? '').trim() || undefined;
+	    const { env: mergedEnv, usedKeychain } = loadSecrets({
+	      baseEnv: env,
+	      secretsSource,
+	      keychainService,
+	      keychainAccount,
+	    });
+	    if (sources.length > 0) {
+	      console.log(`[pipeline] using env sources: ${sources.join(', ')}`);
+	      console.log('[pipeline] warning: env-file mode is for fast local iteration; prefer Keychain bundle for long-term use.');
+	    }
+	    if (usedKeychain) {
+	      console.log(`[pipeline] loaded secrets from Keychain service '${keychainService}'`);
+	    }
+
+		    const allowStable = String(values['allow-stable'] ?? '').trim();
+		    const releaseMessage = String(values['release-message'] ?? '').trim();
+		    const runContracts = String(values['run-contracts'] ?? '').trim();
+		    const checkInstallers = String(values['check-installers'] ?? '').trim();
+		    const allowDirty = parseBoolString(values['allow-dirty'], '--allow-dirty');
+		    const dryRun = values['dry-run'] === true;
+		    if (!dryRun) assertCleanWorktree({ cwd: repoRoot, allowDirty });
+
+		    runPublishCliBinaries({
+		      repoRoot,
+		      env: mergedEnv,
+	      dryRun,
+	      args: [
+	        '--channel',
+	        channel,
+	        '--allow-stable',
+	        allowStable || 'false',
+	        '--release-message',
+	        releaseMessage,
+	        '--run-contracts',
+	        runContracts || 'auto',
+	        '--check-installers',
+	        checkInstallers || 'true',
+	        ...(dryRun ? ['--dry-run'] : []),
+	      ],
+	    });
+
+	    return;
+	  }
+
+		  if (subcommand === 'publish-hstack-binaries') {
+		    const { values } = parseArgs({
+		      args: rest,
+		      options: {
+		        channel: { type: 'string' },
+		        'allow-stable': { type: 'string', default: 'false' },
+		        'release-message': { type: 'string', default: '' },
+		        'run-contracts': { type: 'string', default: 'auto' },
+		        'check-installers': { type: 'string', default: 'true' },
+		        'allow-dirty': { type: 'string', default: 'false' },
+		        'dry-run': { type: 'boolean', default: false },
+		        'secrets-source': { type: 'string', default: 'auto' },
+		        'keychain-service': { type: 'string', default: 'happier/pipeline' },
+		        'keychain-account': { type: 'string', default: '' },
+		      },
+	      allowPositionals: false,
+	    });
+
+	    const channel = String(values.channel ?? '').trim();
+	    if (!isRollingReleaseChannel(channel)) {
+	      fail(`--channel must be 'stable' or 'preview' (got: ${channel || '<empty>'})`);
+	    }
+
+	    const { env, sources } = loadPipelineEnv({ repoRoot });
+	    const secretsSourceRaw = String(values['secrets-source'] ?? '').trim();
+	    const secretsSource =
+	      secretsSourceRaw === 'auto' || secretsSourceRaw === 'env' || secretsSourceRaw === 'keychain'
+	        ? secretsSourceRaw
+	        : 'auto';
+	    if (secretsSourceRaw && secretsSource !== secretsSourceRaw) {
+	      fail(`--secrets-source must be 'auto', 'env', or 'keychain' (got: ${secretsSourceRaw})`);
+	    }
+
+	    const keychainService = String(values['keychain-service'] ?? '').trim() || 'happier/pipeline';
+	    const keychainAccount = String(values['keychain-account'] ?? '').trim() || undefined;
+	    const { env: mergedEnv, usedKeychain } = loadSecrets({
+	      baseEnv: env,
+	      secretsSource,
+	      keychainService,
+	      keychainAccount,
+	    });
+	    if (sources.length > 0) {
+	      console.log(`[pipeline] using env sources: ${sources.join(', ')}`);
+	      console.log('[pipeline] warning: env-file mode is for fast local iteration; prefer Keychain bundle for long-term use.');
+	    }
+	    if (usedKeychain) {
+	      console.log(`[pipeline] loaded secrets from Keychain service '${keychainService}'`);
+	    }
+
+		    const allowStable = String(values['allow-stable'] ?? '').trim();
+		    const releaseMessage = String(values['release-message'] ?? '').trim();
+		    const runContracts = String(values['run-contracts'] ?? '').trim();
+		    const checkInstallers = String(values['check-installers'] ?? '').trim();
+		    const allowDirty = parseBoolString(values['allow-dirty'], '--allow-dirty');
+		    const dryRun = values['dry-run'] === true;
+		    if (!dryRun) assertCleanWorktree({ cwd: repoRoot, allowDirty });
+
+		    runPublishHstackBinaries({
+		      repoRoot,
+		      env: mergedEnv,
+	      dryRun,
+	      args: [
+	        '--channel',
+	        channel,
+	        '--allow-stable',
+	        allowStable || 'false',
+	        '--release-message',
+	        releaseMessage,
+	        '--run-contracts',
+	        runContracts || 'auto',
+	        '--check-installers',
+	        checkInstallers || 'true',
+	        ...(dryRun ? ['--dry-run'] : []),
+	      ],
+	    });
+
+	    return;
+	  }
+
+		  if (subcommand === 'publish-server-runtime') {
+		    const { values } = parseArgs({
+		      args: rest,
+		      options: {
+		        channel: { type: 'string' },
+	        'allow-stable': { type: 'string', default: 'false' },
+	        'release-message': { type: 'string', default: '' },
+	        'run-contracts': { type: 'string', default: 'auto' },
+	        'check-installers': { type: 'string', default: 'true' },
+	        'allow-dirty': { type: 'string', default: 'false' },
+	        'dry-run': { type: 'boolean', default: false },
+	        'secrets-source': { type: 'string', default: 'auto' },
+	        'keychain-service': { type: 'string', default: 'happier/pipeline' },
+	        'keychain-account': { type: 'string', default: '' },
+	      },
       allowPositionals: false,
     });
 
@@ -809,15 +1558,17 @@ function main() {
       console.log(`[pipeline] loaded secrets from Keychain service '${keychainService}'`);
     }
 
-    const allowStable = String(values['allow-stable'] ?? '').trim();
-    const releaseMessage = String(values['release-message'] ?? '').trim();
-    const runContracts = String(values['run-contracts'] ?? '').trim();
-    const checkInstallers = String(values['check-installers'] ?? '').trim();
-    const dryRun = values['dry-run'] === true;
+	    const allowStable = String(values['allow-stable'] ?? '').trim();
+	    const releaseMessage = String(values['release-message'] ?? '').trim();
+	    const runContracts = String(values['run-contracts'] ?? '').trim();
+	    const checkInstallers = String(values['check-installers'] ?? '').trim();
+	    const allowDirty = parseBoolString(values['allow-dirty'], '--allow-dirty');
+	    const dryRun = values['dry-run'] === true;
+	    if (!dryRun) assertCleanWorktree({ cwd: repoRoot, allowDirty });
 
-    runPublishServerRuntime({
-      repoRoot,
-      env: mergedEnv,
+	    runPublishServerRuntime({
+	      repoRoot,
+	      env: mergedEnv,
       dryRun,
       args: [
         '--channel',
@@ -827,7 +1578,7 @@ function main() {
         '--release-message',
         releaseMessage,
         '--run-contracts',
-        runContracts || 'true',
+        runContracts || 'auto',
         '--check-installers',
         checkInstallers || 'true',
         ...(dryRun ? ['--dry-run'] : []),
@@ -938,53 +1689,32 @@ function main() {
 	    return;
 	  }
 
-	  if (
-	    subcommand === 'release-sync-installers' ||
-	    subcommand === 'release-bump-version' ||
-	    subcommand === 'release-build-cli-binaries' ||
-	    subcommand === 'release-build-hstack-binaries' ||
-	    subcommand === 'release-build-server-binaries' ||
-	    subcommand === 'release-publish-manifests' ||
-	    subcommand === 'release-verify-artifacts' ||
-	    subcommand === 'release-compute-changed-components' ||
-	    subcommand === 'release-resolve-bump-plan' ||
-	    subcommand === 'release-compute-deploy-plan' ||
-	    subcommand === 'release-build-ui-web-bundle'
-	  ) {
-	    const { values, positionals } = parseArgs({
-	      args: rest,
-	      options: {
-	        'deploy-environment': { type: 'string', default: 'production' },
-	        'dry-run': { type: 'boolean', default: false },
-	        'secrets-source': { type: 'string', default: 'auto' },
-	        'keychain-service': { type: 'string', default: 'happier/pipeline' },
-	        'keychain-account': { type: 'string', default: '' },
-	      },
-	      allowPositionals: true,
-	      strict: false,
-	    });
+		  if (
+		    subcommand === 'release-sync-installers' ||
+		    subcommand === 'release-bump-version' ||
+		    subcommand === 'release-build-cli-binaries' ||
+		    subcommand === 'release-build-hstack-binaries' ||
+		    subcommand === 'release-build-server-binaries' ||
+		    subcommand === 'release-publish-manifests' ||
+		    subcommand === 'release-verify-artifacts' ||
+		    subcommand === 'release-compute-changed-components' ||
+		    subcommand === 'release-resolve-bump-plan' ||
+		    subcommand === 'release-compute-deploy-plan' ||
+		    subcommand === 'release-build-ui-web-bundle'
+		  ) {
+		    const {
+		      deployEnvironment,
+		      dryRun,
+		      secretsSource,
+		      keychainService,
+		      keychainAccount: keychainAccountRaw,
+		      passthrough,
+		    } = splitWrappedReleaseArgs(rest);
+		    const keychainAccount = keychainAccountRaw.trim() || undefined;
 
-	    const deployEnvironment = String(values['deploy-environment'] ?? '').trim() || 'production';
-	    if (!isDeployEnvironment(deployEnvironment)) {
-	      fail(`--deploy-environment must be 'production' or 'preview' (got: ${deployEnvironment || '<empty>'})`);
-	    }
-
-	    const secretsSourceRaw = String(values['secrets-source'] ?? '').trim();
-	    const secretsSource =
-	      secretsSourceRaw === 'auto' || secretsSourceRaw === 'env' || secretsSourceRaw === 'keychain'
-	        ? secretsSourceRaw
-	        : 'auto';
-	    if (secretsSourceRaw && secretsSource !== secretsSourceRaw) {
-	      fail(`--secrets-source must be 'auto', 'env', or 'keychain' (got: ${secretsSourceRaw})`);
-	    }
-
-	    const keychainService = String(values['keychain-service'] ?? '').trim() || 'happier/pipeline';
-	    const keychainAccount = String(values['keychain-account'] ?? '').trim() || undefined;
-	    const dryRun = values['dry-run'] === true;
-
-	    const scriptFile =
-	      subcommand === 'release-sync-installers'
-	        ? 'sync-installers.mjs'
+		    const scriptFile =
+		      subcommand === 'release-sync-installers'
+		        ? 'sync-installers.mjs'
 	        : subcommand === 'release-bump-version'
 	          ? 'bump-version.mjs'
 	          : subcommand === 'release-build-cli-binaries'
@@ -1005,17 +1735,17 @@ function main() {
 	                          ? 'compute-deploy-plan.mjs'
 	                          : 'build-ui-web-bundle.mjs';
 
-	    if (dryRun) {
-	      runReleaseWrappedScript({
-	        repoRoot,
-	        env: process.env,
-	        scriptFile,
-	        args: positionals,
-	        dryRun: true,
-	        skipExecOnDryRun: true,
-	      });
-	      return;
-	    }
+		    if (dryRun) {
+		      runReleaseWrappedScript({
+		        repoRoot,
+		        env: process.env,
+		        scriptFile,
+		        args: passthrough,
+		        dryRun: true,
+		        skipExecOnDryRun: true,
+		      });
+		      return;
+		    }
 
 	    const { env, sources } = loadPipelineEnv({ repoRoot, deployEnvironment });
 	    const { env: mergedEnv, usedKeychain } = loadSecrets({
@@ -1032,15 +1762,15 @@ function main() {
 	      console.log(`[pipeline] loaded secrets from Keychain service '${keychainService}'`);
 	    }
 
-	    runReleaseWrappedScript({
-	      repoRoot,
-	      env: mergedEnv,
-	      scriptFile,
-	      args: positionals,
-	      dryRun: false,
-	    });
-	    return;
-	  }
+		    runReleaseWrappedScript({
+		      repoRoot,
+		      env: mergedEnv,
+		      scriptFile,
+		      args: passthrough,
+		      dryRun: false,
+		    });
+		    return;
+		  }
 
 	  if (subcommand === 'expo-ota') {
 	    const { values } = parseArgs({
@@ -1522,14 +2252,22 @@ function main() {
       fail(`--platform must be 'ios', 'android', or 'all' (got: ${platform})`);
     }
 
-    const profile = String(values.profile ?? '').trim();
-    if ((action === 'native' || action === 'native_submit') && !profile) {
-      fail('--profile is required for native actions');
-    }
-    const publishApkReleaseMode = String(values['publish-apk-release'] ?? '').trim().toLowerCase() || 'auto';
-    if (publishApkReleaseMode !== 'auto' && publishApkReleaseMode !== 'true' && publishApkReleaseMode !== 'false') {
-      fail(`--publish-apk-release must be 'auto', 'true', or 'false' (got: ${values['publish-apk-release']})`);
-    }
+	    const profile = String(values.profile ?? '').trim();
+	    if ((action === 'native' || action === 'native_submit') && !profile) {
+	      fail('--profile is required for native actions');
+	    }
+	    if (action === 'native' || action === 'native_submit') {
+	      const expectedPrefix = environment === 'production' ? 'production' : 'preview';
+	      if (!profile.startsWith(expectedPrefix)) {
+	        fail(
+	          `--profile must start with '${expectedPrefix}' for --environment '${environment}' (got: ${profile || '<empty>'}).`,
+	        );
+	      }
+	    }
+	    const publishApkReleaseMode = String(values['publish-apk-release'] ?? '').trim().toLowerCase() || 'auto';
+	    if (publishApkReleaseMode !== 'auto' && publishApkReleaseMode !== 'true' && publishApkReleaseMode !== 'false') {
+	      fail(`--publish-apk-release must be 'auto', 'true', or 'false' (got: ${values['publish-apk-release']})`);
+	    }
 
 	    const buildJson = String(values['build-json'] ?? '').trim() || '/tmp/eas_build.json';
 	    const outDir = String(values['out-dir'] ?? '').trim() || 'dist/ui-mobile';
@@ -1794,13 +2532,40 @@ function main() {
 	    }
 
 	    return;
+		  }
+
+	  if (subcommand === 'tauri-validate-updater-pubkey') {
+	    const { values } = parseArgs({
+	      args: rest,
+	      options: {
+	        'config-path': { type: 'string', default: '' },
+	        'dry-run': { type: 'boolean', default: false },
+	      },
+	      allowPositionals: false,
+	    });
+
+	    const configPath = String(values['config-path'] ?? '').trim();
+	    if (!configPath) fail('--config-path is required');
+	    const dryRun = values['dry-run'] === true;
+
+	    runTauriValidateUpdaterPubkey({
+	      repoRoot,
+	      env: { ...process.env },
+	      dryRun,
+	      args: [
+	        '--config-path',
+	        configPath,
+	      ],
+	    });
+
+	    return;
 	  }
 
-  if (subcommand === 'tauri-prepare-assets') {
-    const { values } = parseArgs({
-      args: rest,
-      options: {
-        environment: { type: 'string' },
+		  if (subcommand === 'tauri-prepare-assets') {
+		    const { values } = parseArgs({
+	      args: rest,
+	      options: {
+	        environment: { type: 'string' },
         repo: { type: 'string' },
         'ui-version': { type: 'string' },
         'artifacts-dir': { type: 'string', default: 'dist/tauri/updates' },
@@ -1869,23 +2634,231 @@ function main() {
       ],
     });
 
-    return;
-  }
+	    return;
+	  }
 
-  if (subcommand === 'docker-publish') {
-    const { values } = parseArgs({
-      args: rest,
-      options: {
-        channel: { type: 'string' },
-        sha: { type: 'string', default: '' },
-        'push-latest': { type: 'string', default: 'true' },
-        'build-relay': { type: 'string', default: 'true' },
-        'build-devcontainer': { type: 'string', default: 'true' },
-        'dry-run': { type: 'boolean', default: false },
-        'secrets-source': { type: 'string', default: 'auto' },
-        'keychain-service': { type: 'string', default: 'happier/pipeline' },
-        'keychain-account': { type: 'string', default: '' },
-      },
+	  if (subcommand === 'tauri-build-updater-artifacts') {
+	    const { values } = parseArgs({
+	      args: rest,
+	      options: {
+	        environment: { type: 'string' },
+	        'build-version': { type: 'string', default: '' },
+	        'tauri-target': { type: 'string', default: '' },
+	        'ui-dir': { type: 'string', default: 'apps/ui' },
+	        'dry-run': { type: 'boolean', default: false },
+	        'secrets-source': { type: 'string', default: 'auto' },
+	        'keychain-service': { type: 'string', default: 'happier/pipeline' },
+	        'keychain-account': { type: 'string', default: '' },
+	      },
+	      allowPositionals: false,
+	    });
+
+	    const environment = String(values.environment ?? '').trim();
+	    if (environment !== 'preview' && environment !== 'production') {
+	      fail(`--environment must be 'preview' or 'production' (got: ${environment || '<empty>'})`);
+	    }
+
+	    const buildVersion = String(values['build-version'] ?? '').trim();
+	    const tauriTarget = String(values['tauri-target'] ?? '').trim();
+	    const uiDir = String(values['ui-dir'] ?? '').trim() || 'apps/ui';
+	    const dryRun = values['dry-run'] === true;
+
+	    const { env, sources } = loadPipelineEnv({ repoRoot });
+	    const secretsSourceRaw = String(values['secrets-source'] ?? '').trim();
+	    const secretsSource =
+	      secretsSourceRaw === 'auto' || secretsSourceRaw === 'env' || secretsSourceRaw === 'keychain'
+	        ? secretsSourceRaw
+	        : 'auto';
+	    if (secretsSourceRaw && secretsSource !== secretsSourceRaw) {
+	      fail(`--secrets-source must be 'auto', 'env', or 'keychain' (got: ${secretsSourceRaw})`);
+	    }
+
+	    const keychainService = String(values['keychain-service'] ?? '').trim() || 'happier/pipeline';
+	    const keychainAccount = String(values['keychain-account'] ?? '').trim() || undefined;
+	    const { env: mergedEnv, usedKeychain } = loadSecrets({
+	      baseEnv: env,
+	      secretsSource,
+	      keychainService,
+	      keychainAccount,
+	    });
+	    if (sources.length > 0) {
+	      console.log(`[pipeline] using env sources: ${sources.join(', ')}`);
+	      console.log('[pipeline] warning: env-file mode is for fast local iteration; prefer Keychain bundle for long-term use.');
+	    }
+	    if (usedKeychain) {
+	      console.log(`[pipeline] loaded secrets from Keychain service '${keychainService}'`);
+	    }
+
+	    runTauriBuildUpdaterArtifacts({
+	      repoRoot,
+	      env: mergedEnv,
+	      dryRun,
+	      args: [
+	        '--environment',
+	        environment,
+	        ...(buildVersion ? ['--build-version', buildVersion] : []),
+	        ...(tauriTarget ? ['--tauri-target', tauriTarget] : []),
+	        ...(uiDir ? ['--ui-dir', uiDir] : []),
+	        ...(dryRun ? ['--dry-run'] : []),
+	      ],
+	    });
+
+	    return;
+	  }
+
+	  if (subcommand === 'tauri-notarize-macos-artifacts') {
+	    const { values } = parseArgs({
+	      args: rest,
+	      options: {
+	        'ui-dir': { type: 'string', default: 'apps/ui' },
+	        'tauri-target': { type: 'string', default: '' },
+	        'dry-run': { type: 'boolean', default: false },
+	        'secrets-source': { type: 'string', default: 'auto' },
+	        'keychain-service': { type: 'string', default: 'happier/pipeline' },
+	        'keychain-account': { type: 'string', default: '' },
+	      },
+	      allowPositionals: false,
+	    });
+
+	    const uiDir = String(values['ui-dir'] ?? '').trim() || 'apps/ui';
+	    const tauriTarget = String(values['tauri-target'] ?? '').trim();
+	    const dryRun = values['dry-run'] === true;
+
+	    const { env, sources } = loadPipelineEnv({ repoRoot });
+	    const secretsSourceRaw = String(values['secrets-source'] ?? '').trim();
+	    const secretsSource =
+	      secretsSourceRaw === 'auto' || secretsSourceRaw === 'env' || secretsSourceRaw === 'keychain'
+	        ? secretsSourceRaw
+	        : 'auto';
+	    if (secretsSourceRaw && secretsSource !== secretsSourceRaw) {
+	      fail(`--secrets-source must be 'auto', 'env', or 'keychain' (got: ${secretsSourceRaw})`);
+	    }
+
+	    const keychainService = String(values['keychain-service'] ?? '').trim() || 'happier/pipeline';
+	    const keychainAccount = String(values['keychain-account'] ?? '').trim() || undefined;
+	    const { env: mergedEnv, usedKeychain } = loadSecrets({
+	      baseEnv: env,
+	      secretsSource,
+	      keychainService,
+	      keychainAccount,
+	    });
+	    if (sources.length > 0) {
+	      console.log(`[pipeline] using env sources: ${sources.join(', ')}`);
+	      console.log('[pipeline] warning: env-file mode is for fast local iteration; prefer Keychain bundle for long-term use.');
+	    }
+	    if (usedKeychain) {
+	      console.log(`[pipeline] loaded secrets from Keychain service '${keychainService}'`);
+	    }
+
+	    runTauriNotarizeMacosArtifacts({
+	      repoRoot,
+	      env: mergedEnv,
+	      dryRun,
+	      args: [
+	        ...(uiDir ? ['--ui-dir', uiDir] : []),
+	        ...(tauriTarget ? ['--tauri-target', tauriTarget] : []),
+	        ...(dryRun ? ['--dry-run'] : []),
+	      ],
+	    });
+
+	    return;
+	  }
+
+	  if (subcommand === 'tauri-collect-updater-artifacts') {
+	    const { values } = parseArgs({
+	      args: rest,
+	      options: {
+	        environment: { type: 'string' },
+	        'platform-key': { type: 'string' },
+	        'ui-version': { type: 'string' },
+	        'tauri-target': { type: 'string', default: '' },
+	        'ui-dir': { type: 'string', default: 'apps/ui' },
+	        'dry-run': { type: 'boolean', default: false },
+	      },
+	      allowPositionals: false,
+	    });
+
+	    const environment = String(values.environment ?? '').trim();
+	    if (environment !== 'preview' && environment !== 'production') {
+	      fail(`--environment must be 'preview' or 'production' (got: ${environment || '<empty>'})`);
+	    }
+
+	    const platformKey = String(values['platform-key'] ?? '').trim();
+	    const uiVersion = String(values['ui-version'] ?? '').trim();
+	    const tauriTarget = String(values['tauri-target'] ?? '').trim();
+	    const uiDir = String(values['ui-dir'] ?? '').trim() || 'apps/ui';
+	    const dryRun = values['dry-run'] === true;
+
+	    runTauriCollectUpdaterArtifacts({
+	      repoRoot,
+	      env: { ...process.env },
+	      dryRun,
+	      args: [
+	        '--environment',
+	        environment,
+	        '--platform-key',
+	        platformKey,
+	        '--ui-version',
+	        uiVersion,
+	        ...(tauriTarget ? ['--tauri-target', tauriTarget] : []),
+	        ...(uiDir ? ['--ui-dir', uiDir] : []),
+	        ...(dryRun ? ['--dry-run'] : []),
+	      ],
+	    });
+
+	    return;
+	  }
+
+	  if (subcommand === 'testing-create-auth-credentials') {
+	    const { values } = parseArgs({
+	      args: rest,
+	      options: {
+	        'server-url': { type: 'string', default: '' },
+	        'home-dir': { type: 'string', default: '' },
+	        'active-server-id': { type: 'string', default: '' },
+	        'secret-base64': { type: 'string', default: '' },
+	        'dry-run': { type: 'boolean', default: false },
+	      },
+	      allowPositionals: false,
+	    });
+
+	    const serverUrl = String(values['server-url'] ?? '').trim();
+	    const homeDir = String(values['home-dir'] ?? '').trim();
+	    const activeServerId = String(values['active-server-id'] ?? '').trim();
+	    const secretBase64 = String(values['secret-base64'] ?? '').trim();
+	    const dryRun = values['dry-run'] === true;
+
+	    runTestingCreateAuthCredentials({
+	      repoRoot,
+	      env: { ...process.env },
+	      dryRun,
+	      args: [
+	        ...(serverUrl ? ['--server-url', serverUrl] : []),
+	        ...(homeDir ? ['--home-dir', homeDir] : []),
+	        ...(activeServerId ? ['--active-server-id', activeServerId] : []),
+	        ...(secretBase64 ? ['--secret-base64', secretBase64] : []),
+	      ],
+	    });
+
+	    return;
+	  }
+
+		  if (subcommand === 'docker-publish') {
+		    const { values } = parseArgs({
+		      args: rest,
+		      options: {
+	        channel: { type: 'string' },
+	        registries: { type: 'string', default: '' },
+	        sha: { type: 'string', default: '' },
+	        'push-latest': { type: 'string', default: 'true' },
+	        'build-relay': { type: 'string', default: 'true' },
+	        'build-dev-box': { type: 'string', default: 'true' },
+	        'allow-dirty': { type: 'string', default: 'false' },
+	        'dry-run': { type: 'boolean', default: false },
+	        'secrets-source': { type: 'string', default: 'auto' },
+	        'keychain-service': { type: 'string', default: 'happier/pipeline' },
+	        'keychain-account': { type: 'string', default: '' },
+	      },
       allowPositionals: false,
     });
 
@@ -1921,12 +2894,15 @@ function main() {
     }
 
     const sha = String(values.sha ?? '').trim();
-    const pushLatest = String(values['push-latest'] ?? '').trim();
-    const buildRelay = String(values['build-relay'] ?? '').trim();
-    const buildDevcontainer = String(values['build-devcontainer'] ?? '').trim();
-    const dryRun = values['dry-run'] === true;
+	    const registries = String(values.registries ?? '').trim();
+	    const pushLatest = String(values['push-latest'] ?? '').trim();
+	    const buildRelay = String(values['build-relay'] ?? '').trim();
+	    const buildDevBox = String(values['build-dev-box'] ?? '').trim();
+	    const allowDirty = parseBoolString(values['allow-dirty'], '--allow-dirty');
+	    const dryRun = values['dry-run'] === true;
+	    if (!dryRun) assertCleanWorktree({ cwd: repoRoot, allowDirty });
 
-    console.log(`[pipeline] docker publish: channel=${channel}`);
+	    console.log(`[pipeline] docker publish: channel=${channel}`);
 
     runDockerPublishImages({
       repoRoot,
@@ -1935,38 +2911,135 @@ function main() {
       args: [
         '--channel',
         channel,
+        ...(registries ? ['--registries', registries] : []),
         ...(sha ? ['--sha', sha] : []),
         ...(pushLatest ? ['--push-latest', pushLatest] : []),
         ...(buildRelay ? ['--build-relay', buildRelay] : []),
-        ...(buildDevcontainer ? ['--build-devcontainer', buildDevcontainer] : []),
+        ...(buildDevBox ? ['--build-dev-box', buildDevBox] : []),
         ...(dryRun ? ['--dry-run'] : []),
       ],
     });
 
-    return;
-  }
+	    return;
+	  }
 
-  if (subcommand === 'github-publish-release') {
-    const { values } = parseArgs({
-      args: rest,
-      options: {
-        tag: { type: 'string' },
-        title: { type: 'string' },
-        'target-sha': { type: 'string' },
-        prerelease: { type: 'string' },
-        'rolling-tag': { type: 'string' },
-        'generate-notes': { type: 'string' },
-        notes: { type: 'string', default: '' },
-        assets: { type: 'string', default: '' },
-        'assets-dir': { type: 'string', default: '' },
-        clobber: { type: 'string', default: 'true' },
-        'prune-assets': { type: 'string', default: 'false' },
-        'release-message': { type: 'string', default: '' },
-        'dry-run': { type: 'boolean', default: false },
-        'max-commits': { type: 'string', default: '200' },
-        'secrets-source': { type: 'string', default: 'auto' },
-        'keychain-service': { type: 'string', default: 'happier/pipeline' },
-        'keychain-account': { type: 'string', default: '' },
+		  if (subcommand === 'github-audit-release-assets') {
+		    const { values } = parseArgs({
+		      args: rest,
+		      options: {
+		        tag: { type: 'string' },
+	        kind: { type: 'string' },
+	        version: { type: 'string', default: '' },
+	        targets: { type: 'string', default: '' },
+	        repo: { type: 'string', default: '' },
+	        'assets-json': { type: 'string', default: '' },
+	        'dry-run': { type: 'boolean', default: false },
+	      },
+	      allowPositionals: false,
+	    });
+
+	    const tag = String(values.tag ?? '').trim();
+	    const kind = String(values.kind ?? '').trim();
+	    if (!tag) fail('--tag is required');
+	    if (!kind) fail('--kind is required');
+
+	    const version = String(values.version ?? '').trim();
+	    const targets = String(values.targets ?? '').trim();
+	    const repo = String(values.repo ?? '').trim();
+	    const assetsJson = String(values['assets-json'] ?? '').trim();
+	    const dryRun = values['dry-run'] === true;
+
+	    runGithubAuditReleaseAssets({
+	      repoRoot,
+	      env: { ...process.env },
+	      dryRun,
+	      args: [
+	        '--tag',
+	        tag,
+	        '--kind',
+	        kind,
+	        ...(version ? ['--version', version] : []),
+	        ...(targets ? ['--targets', targets] : []),
+	        ...(repo ? ['--repo', repo] : []),
+	        ...(assetsJson ? ['--assets-json', assetsJson] : []),
+	      ],
+	    });
+
+		    return;
+		  }
+
+		  if (subcommand === 'github-commit-and-push') {
+		    const { values } = parseArgs({
+		      args: rest,
+		      options: {
+		        paths: { type: 'string', default: '' },
+		        'allow-missing': { type: 'string', default: 'false' },
+		        message: { type: 'string', default: '' },
+		        'author-name': { type: 'string', default: '' },
+		        'author-email': { type: 'string', default: '' },
+		        remote: { type: 'string', default: '' },
+		        'push-ref': { type: 'string', default: '' },
+		        'push-mode': { type: 'string', default: '' },
+		        'allow-dirty': { type: 'string', default: 'false' },
+		        'dry-run': { type: 'boolean', default: false },
+		      },
+		      allowPositionals: false,
+		    });
+
+		    const paths = String(values.paths ?? '').trim();
+		    const allowMissing = String(values['allow-missing'] ?? '').trim() || 'false';
+		    const message = String(values.message ?? '').trim();
+		    const authorName = String(values['author-name'] ?? '').trim();
+		    const authorEmail = String(values['author-email'] ?? '').trim();
+		    const remote = String(values.remote ?? '').trim();
+		    const pushRef = String(values['push-ref'] ?? '').trim();
+		    const pushMode = String(values['push-mode'] ?? '').trim();
+		    const allowDirty = parseBoolString(values['allow-dirty'], '--allow-dirty');
+		    const dryRun = values['dry-run'] === true;
+		    if (!dryRun) assertCleanWorktree({ cwd: repoRoot, allowDirty });
+
+		    runGithubCommitAndPush({
+		      repoRoot,
+		      env: { ...process.env },
+		      dryRun,
+		      args: [
+		        ...(paths ? ['--paths', paths] : []),
+		        ...(allowMissing ? ['--allow-missing', allowMissing] : []),
+		        ...(message ? ['--message', message] : []),
+		        ...(authorName ? ['--author-name', authorName] : []),
+		        ...(authorEmail ? ['--author-email', authorEmail] : []),
+		        ...(remote ? ['--remote', remote] : []),
+		        ...(pushRef ? ['--push-ref', pushRef] : []),
+		        ...(pushMode ? ['--push-mode', pushMode] : []),
+		        ...(dryRun ? ['--dry-run'] : []),
+		      ],
+		    });
+
+		    return;
+		  }
+
+		  if (subcommand === 'github-publish-release') {
+		    const { values } = parseArgs({
+		      args: rest,
+		      options: {
+		        tag: { type: 'string' },
+	        title: { type: 'string' },
+	        'target-sha': { type: 'string' },
+	        prerelease: { type: 'string' },
+	        'rolling-tag': { type: 'string' },
+	        'generate-notes': { type: 'string' },
+	        notes: { type: 'string', default: '' },
+	        assets: { type: 'string', default: '' },
+	        'assets-dir': { type: 'string', default: '' },
+	        clobber: { type: 'string', default: 'true' },
+	        'prune-assets': { type: 'string', default: 'false' },
+	        'release-message': { type: 'string', default: '' },
+	        'allow-dirty': { type: 'string', default: 'false' },
+	        'dry-run': { type: 'boolean', default: false },
+	        'max-commits': { type: 'string', default: '200' },
+	        'secrets-source': { type: 'string', default: 'auto' },
+	        'keychain-service': { type: 'string', default: 'happier/pipeline' },
+	        'keychain-account': { type: 'string', default: '' },
       },
       allowPositionals: false,
     });
@@ -2000,12 +3073,14 @@ function main() {
       console.log(`[pipeline] using env sources: ${sources.join(', ')}`);
       console.log('[pipeline] warning: env-file mode is for fast local iteration; prefer Keychain bundle for long-term use.');
     }
-    if (usedKeychain) {
-      console.log(`[pipeline] loaded secrets from Keychain service '${keychainService}'`);
-    }
+	    if (usedKeychain) {
+	      console.log(`[pipeline] loaded secrets from Keychain service '${keychainService}'`);
+	    }
 
-    const dryRun = values['dry-run'] === true;
-    console.log(`[pipeline] github release: tag=${tag}`);
+	    const dryRun = values['dry-run'] === true;
+	    const allowDirty = parseBoolString(values['allow-dirty'], '--allow-dirty');
+	    if (!dryRun) assertCleanWorktree({ cwd: repoRoot, allowDirty });
+	    console.log(`[pipeline] github release: tag=${tag}`);
 
     runGithubPublishRelease({
       repoRoot,
@@ -2045,33 +3120,38 @@ function main() {
     return;
   }
 
-  if (subcommand === 'promote-branch') {
-    const { values } = parseArgs({
-      args: rest,
-      options: {
-        source: { type: 'string' },
-        target: { type: 'string' },
-        mode: { type: 'string' },
-        confirm: { type: 'string', default: '' },
-        'allow-reset': { type: 'string', default: 'false' },
-        'dry-run': { type: 'boolean', default: false },
-        'secrets-source': { type: 'string', default: 'auto' },
-        'keychain-service': { type: 'string', default: 'happier/pipeline' },
-        'keychain-account': { type: 'string', default: '' },
-      },
+	  if (subcommand === 'promote-branch') {
+	    const { values } = parseArgs({
+	      args: rest,
+	      options: {
+	        source: { type: 'string' },
+	        target: { type: 'string' },
+	        mode: { type: 'string' },
+	        confirm: { type: 'string', default: '' },
+	        'allow-reset': { type: 'string', default: 'false' },
+	        'summary-file': { type: 'string', default: '' },
+	        'allow-dirty': { type: 'string', default: 'false' },
+	        'dry-run': { type: 'boolean', default: false },
+	        'secrets-source': { type: 'string', default: 'auto' },
+	        'keychain-service': { type: 'string', default: 'happier/pipeline' },
+	        'keychain-account': { type: 'string', default: '' },
+	      },
       allowPositionals: false,
     });
 
     const source = String(values.source ?? '').trim();
     const target = String(values.target ?? '').trim();
-    const mode = String(values.mode ?? '').trim();
-    const confirm = String(values.confirm ?? '').trim();
-    const allowReset = String(values['allow-reset'] ?? '').trim();
-    const dryRun = values['dry-run'] === true;
+	    const mode = String(values.mode ?? '').trim();
+	    const confirm = String(values.confirm ?? '').trim();
+	    const allowReset = String(values['allow-reset'] ?? '').trim();
+	    const summaryFile = String(values['summary-file'] ?? '').trim();
+	    const allowDirty = parseBoolString(values['allow-dirty'], '--allow-dirty');
+	    const dryRun = values['dry-run'] === true;
+	    if (!dryRun) assertCleanWorktree({ cwd: repoRoot, allowDirty });
 
-    if (!source || !target || !mode) {
-      fail('--source, --target, and --mode are required');
-    }
+	    if (!source || !target || !mode) {
+	      fail('--source, --target, and --mode are required');
+	    }
 
     const { env, sources } = loadPipelineEnv({ repoRoot });
     const secretsSourceRaw = String(values['secrets-source'] ?? '').trim();
@@ -2116,6 +3196,7 @@ function main() {
         allowReset || 'false',
         '--confirm',
         confirm,
+        ...(summaryFile ? ['--summary-file', summaryFile] : []),
         ...(dryRun ? ['--dry-run'] : []),
       ],
     });
@@ -2123,21 +3204,23 @@ function main() {
     return;
   }
 
-  if (subcommand === 'promote-deploy-branch') {
-    const { values } = parseArgs({
-      args: rest,
-      options: {
-        'deploy-environment': { type: 'string' },
-        component: { type: 'string' },
-        'source-ref': { type: 'string', default: '' },
-        sha: { type: 'string', default: '' },
-        'dry-run': { type: 'boolean', default: false },
-        'secrets-source': { type: 'string', default: 'auto' },
-        'keychain-service': { type: 'string', default: 'happier/pipeline' },
-        'keychain-account': { type: 'string', default: '' },
-      },
-      allowPositionals: false,
-    });
+		  if (subcommand === 'promote-deploy-branch') {
+		    const { values } = parseArgs({
+		      args: rest,
+		      options: {
+		        'deploy-environment': { type: 'string' },
+		        component: { type: 'string' },
+		        'source-ref': { type: 'string', default: '' },
+		        sha: { type: 'string', default: '' },
+		        'summary-file': { type: 'string', default: '' },
+		        'allow-dirty': { type: 'string', default: 'false' },
+		        'dry-run': { type: 'boolean', default: false },
+		        'secrets-source': { type: 'string', default: 'auto' },
+		        'keychain-service': { type: 'string', default: 'happier/pipeline' },
+		        'keychain-account': { type: 'string', default: '' },
+		      },
+	      allowPositionals: false,
+	    });
 
     const deployEnvironment = String(values['deploy-environment'] ?? '').trim();
     if (!isDeployEnvironment(deployEnvironment)) {
@@ -2174,329 +3257,682 @@ function main() {
       console.log(`[pipeline] loaded secrets from Keychain service '${keychainService}'`);
     }
 
-    const sourceRef = String(values['source-ref'] ?? '').trim();
-    const sha = String(values.sha ?? '').trim();
-    const dryRun = values['dry-run'] === true;
+		    const sourceRef = String(values['source-ref'] ?? '').trim();
+		    const sha = String(values.sha ?? '').trim();
+		    const summaryFile = String(values['summary-file'] ?? '').trim();
+		    const allowDirty = parseBoolString(values['allow-dirty'], '--allow-dirty');
+		    const dryRun = values['dry-run'] === true;
+		    if (!dryRun) assertCleanWorktree({ cwd: repoRoot, allowDirty });
 
-    const deployBranch = `deploy/${deployEnvironment}/${component}`;
-    console.log(`[pipeline] promote deploy branch: ${deployBranch} <= ${sourceRef || sha}`);
+	    const deployBranch = `deploy/${deployEnvironment}/${component}`;
+	    console.log(`[pipeline] promote deploy branch: ${deployBranch} <= ${sourceRef || sha}`);
 
-    runGithubPromoteDeployBranch({
-      repoRoot,
-      env: mergedEnv,
-      dryRun,
-      args: [
-        '--deploy-environment',
-        deployEnvironment,
-        '--component',
-        component,
-        ...(sourceRef ? ['--source-ref', sourceRef] : []),
-        ...(sha ? ['--sha', sha] : []),
-        ...(dryRun ? ['--dry-run'] : []),
-      ],
-    });
-
-    return;
-  }
-
-  if (subcommand === 'release') {
-    const { values } = parseArgs({
-      args: rest,
-      options: {
-        confirm: { type: 'string' },
-        repository: { type: 'string' },
-        'deploy-environment': { type: 'string', default: 'production' },
-        'deploy-targets': { type: 'string', default: 'ui,server,website,docs' },
-        'publish-docker': { type: 'string', default: 'auto' },
-        'publish-ui-web': { type: 'string', default: 'auto' },
-        'publish-server-runtime': { type: 'string', default: 'auto' },
-        'release-message': { type: 'string', default: '' },
-        'npm-targets': { type: 'string', default: '' },
-        'npm-mode': { type: 'string', default: 'pack+publish' },
-        'npm-run-tests': { type: 'string', default: 'true' },
-        'npm-server-runner-dir': { type: 'string', default: 'packages/relay-server' },
-        'dry-run': { type: 'boolean', default: false },
-        'secrets-source': { type: 'string', default: 'auto' },
-        'keychain-service': { type: 'string', default: 'happier/pipeline' },
-        'keychain-account': { type: 'string', default: '' },
-      },
-      allowPositionals: false,
-    });
-
-    const action = String(values.confirm ?? '').trim();
-    if (!action) {
-      fail('--confirm is required (e.g. "release preview from dev")');
-    }
-    if (action !== 'release preview from dev' && action !== 'release dev to main' && action !== 'reset main from dev') {
-      fail(`Unsupported --confirm action: ${action}`);
-    }
-
-    const repository = String(values.repository ?? '').trim();
-    if (!repository) {
-      fail('--repository is required (e.g. happier-dev/happier)');
-    }
-
-    const deployEnvironment = String(values['deploy-environment'] ?? '').trim();
-    if (!isDeployEnvironment(deployEnvironment)) {
-      fail(`--deploy-environment must be 'production' or 'preview' (got: ${deployEnvironment || '<empty>'})`);
-    }
-
-    const deployTargets = parseCsvList(String(values['deploy-targets'] ?? ''));
-    if (deployTargets.length === 0) {
-      fail('--deploy-targets must not be empty');
-    }
-    for (const t of deployTargets) {
-      if (!isReleaseTarget(t)) {
-        fail(`--deploy-targets contains unsupported target '${t}' (supported: ui,server,website,docs,cli,stack,server_runner)`);
-      }
-    }
-
-    const dryRun = values['dry-run'] === true;
-
-    const { env, sources } = loadPipelineEnv({ repoRoot, deployEnvironment });
-    const secretsSourceRaw = String(values['secrets-source'] ?? '').trim();
-    const secretsSource =
-      secretsSourceRaw === 'auto' || secretsSourceRaw === 'env' || secretsSourceRaw === 'keychain'
-        ? secretsSourceRaw
-        : 'auto';
-    if (secretsSourceRaw && secretsSource !== secretsSourceRaw) {
-      fail(`--secrets-source must be 'auto', 'env', or 'keychain' (got: ${secretsSourceRaw})`);
-    }
-
-    const keychainService = String(values['keychain-service'] ?? '').trim() || 'happier/pipeline';
-    const keychainAccount = String(values['keychain-account'] ?? '').trim() || undefined;
-    const { env: mergedEnv, usedKeychain } = loadSecrets({
-      baseEnv: env,
-      secretsSource,
-      keychainService,
-      keychainAccount,
-    });
-    if (sources.length > 0) {
-      console.log(`[pipeline] using env sources: ${sources.join(', ')}`);
-      console.log('[pipeline] warning: env-file mode is for fast local iteration; prefer Keychain bundle for long-term use.');
-    }
-    if (usedKeychain) {
-      console.log(`[pipeline] loaded secrets from Keychain service '${keychainService}'`);
-    }
-
-    console.log(`[pipeline] release: action=${action}`);
-
-    const releaseChannel = action === 'release preview from dev' ? 'preview' : 'production';
-    const releaseMessage = String(values['release-message'] ?? '').trim();
-
-    let sourceRef = 'dev';
-    if (action === 'release dev to main') {
-      console.log('[pipeline] promote main from dev');
-      runGithubPromoteBranch({
-        repoRoot,
-        env: mergedEnv,
-        dryRun,
-        args: [
-          '--source',
-          'dev',
-          '--target',
-          'main',
-          '--mode',
-          'fast_forward',
-          '--allow-reset',
-          'false',
-          '--confirm',
-          'promote main from dev',
-          ...(dryRun ? ['--dry-run'] : []),
-        ],
-      });
-      sourceRef = 'main';
-    } else if (action === 'reset main from dev') {
-      console.log('[pipeline] reset main from dev');
-      runGithubPromoteBranch({
-        repoRoot,
-        env: mergedEnv,
-        dryRun,
-        args: [
-          '--source',
-          'dev',
-          '--target',
-          'main',
-          '--mode',
-          'reset',
-          '--allow-reset',
-          'true',
-          '--confirm',
-          'reset main from dev',
-          ...(dryRun ? ['--dry-run'] : []),
-        ],
-      });
-      sourceRef = 'main';
-    }
-
-    const npmTargetsExplicit = parseCsvList(String(values['npm-targets'] ?? ''));
-    const npmTargetsDerived = [
-      ...(deployTargets.includes('cli') ? ['cli'] : []),
-      ...(deployTargets.includes('stack') ? ['stack'] : []),
-      ...(deployTargets.includes('server_runner') ? ['server'] : []),
-    ];
-    const npmTargets = npmTargetsExplicit.length > 0 ? npmTargetsExplicit : npmTargetsDerived;
-    const npmMode = String(values['npm-mode'] ?? '').trim() || 'pack+publish';
-    const npmRunTests = String(values['npm-run-tests'] ?? '').trim() || 'true';
-    const npmServerRunnerDir = String(values['npm-server-runner-dir'] ?? '').trim() || 'packages/relay-server';
-    if (npmMode !== 'pack' && npmMode !== 'pack+publish') {
-      fail(`--npm-mode must be 'pack' or 'pack+publish' (got: ${npmMode})`);
-    }
-    for (const t of npmTargets) {
-      if (t !== 'cli' && t !== 'stack' && t !== 'server') {
-        fail(`--npm-targets contains unsupported target '${t}' (supported: cli, stack, server)`);
-      }
-    }
-
-    if (npmTargets.length > 0) {
-      const publishCli = npmTargets.includes('cli') ? 'true' : 'false';
-      const publishStack = npmTargets.includes('stack') ? 'true' : 'false';
-      const publishServer = npmTargets.includes('server') ? 'true' : 'false';
-      console.log(`[pipeline] release: npm channel=${releaseChannel} targets=${npmTargets.join(',')}`);
-
-      runNpmReleasePackages({
-        repoRoot,
-        env: mergedEnv,
-        dryRun,
-        args: [
-          '--channel',
-          releaseChannel,
-          '--publish-cli',
-          publishCli,
-          '--publish-stack',
-          publishStack,
-          '--publish-server',
-          publishServer,
-          '--server-runner-dir',
-          npmServerRunnerDir,
-          '--run-tests',
-          npmRunTests,
-          '--mode',
-          npmMode,
-          ...(dryRun ? ['--dry-run'] : []),
-        ],
-      });
-    }
-
-    const publishDocker = resolveAutoBool(values['publish-docker'], '--publish-docker', releaseChannel === 'preview');
-    const publishUiWeb = resolveAutoBool(
-      values['publish-ui-web'],
-      '--publish-ui-web',
-      releaseChannel === 'preview' && deployTargets.includes('ui'),
-    );
-    const publishServerRuntime = resolveAutoBool(
-      values['publish-server-runtime'],
-      '--publish-server-runtime',
-      releaseChannel === 'preview' && deployTargets.includes('server_runner'),
-    );
-
-    if (releaseChannel === 'preview' && publishUiWeb) {
-      console.log('[pipeline] release: publish ui-web rolling release (preview)');
-      runPublishUiWeb({
-        repoRoot,
-        env: mergedEnv,
-        dryRun,
-        args: [
-          '--channel',
-          'preview',
-          '--allow-stable',
-          'false',
-          '--release-message',
-          releaseMessage,
-          '--run-contracts',
-          'true',
-          '--check-installers',
-          'true',
-          ...(dryRun ? ['--dry-run'] : []),
-        ],
-      });
-    }
-
-    if (releaseChannel === 'preview' && publishServerRuntime) {
-      console.log('[pipeline] release: publish server-runtime rolling release (preview)');
-      runPublishServerRuntime({
-        repoRoot,
-        env: mergedEnv,
-        dryRun,
-        args: [
-          '--channel',
-          'preview',
-          '--allow-stable',
-          'false',
-          '--release-message',
-          releaseMessage,
-          '--run-contracts',
-          'true',
-          '--check-installers',
-          'true',
-          ...(dryRun ? ['--dry-run'] : []),
-        ],
-      });
-    }
-
-    if (releaseChannel === 'preview' && publishDocker) {
-      console.log('[pipeline] release: publish docker images (preview)');
-      console.log('[pipeline] docker publish: channel=preview');
-      runDockerPublishImages({
-        repoRoot,
-        env: mergedEnv,
-        dryRun,
-        args: [
-          '--channel',
-          'preview',
-          '--push-latest',
-          'true',
-          '--build-relay',
-          'true',
-          '--build-devcontainer',
-          'true',
-          ...(dryRun ? ['--dry-run'] : []),
-        ],
-      });
-    }
-
-    const deployComponents = deployTargets.filter((t) => isDeployComponent(t));
-    for (const component of deployComponents) {
-      const refName = `deploy/${deployEnvironment}/${component}`;
-      console.log(`[pipeline] promote deploy branch: ${refName} <= ${sourceRef}`);
-
-      runGithubPromoteDeployBranch({
-        repoRoot,
-        env: mergedEnv,
-        dryRun,
-        args: [
-          '--deploy-environment',
-          deployEnvironment,
-          '--component',
-          component,
-          '--source-ref',
-          sourceRef,
-          ...(dryRun ? ['--dry-run'] : []),
-        ],
-      });
-
-      console.log(`[pipeline] trigger deploy webhooks: ${component}`);
-      runDeployWebhooks({
-        repoRoot,
-        env: mergedEnv,
-        dryRun,
-        args: [
-          '--environment',
-          deployEnvironment,
-          '--component',
-          component,
-          '--repository',
-          repository,
-          '--ref-name',
-          refName,
-          ...(dryRun ? ['--sha', '0123456789abcdef0123456789abcdef01234567'] : []),
-          ...(dryRun ? ['--dry-run'] : []),
-        ],
-      });
-    }
+	    runGithubPromoteDeployBranch({
+	      repoRoot,
+	      env: mergedEnv,
+	      dryRun,
+	      args: [
+	        '--deploy-environment',
+	        deployEnvironment,
+	        '--component',
+	        component,
+	        ...(sourceRef ? ['--source-ref', sourceRef] : []),
+	        ...(sha ? ['--sha', sha] : []),
+	        ...(summaryFile ? ['--summary-file', summaryFile] : []),
+	        ...(dryRun ? ['--dry-run'] : []),
+	      ],
+	    });
 
     return;
   }
+
+			  if (subcommand === 'release') {
+			    const { values } = parseArgs({
+			      args: rest,
+			      options: {
+			        confirm: { type: 'string' },
+			        repository: { type: 'string' },
+			        'deploy-environment': { type: 'string', default: 'preview' },
+			        'deploy-targets': { type: 'string', default: 'ui,server,website,docs' },
+			        'force-deploy': { type: 'string', default: 'false' },
+			        bump: { type: 'string', default: 'none' },
+			        'bump-app-override': { type: 'string', default: 'preset' },
+			        'bump-cli-override': { type: 'string', default: 'preset' },
+			        'bump-stack-override': { type: 'string', default: 'preset' },
+			        'ui-expo-action': { type: 'string', default: 'none' },
+			        'ui-expo-builder': { type: 'string', default: 'eas_cloud' },
+			        'ui-expo-profile': { type: 'string', default: 'auto' },
+			        'ui-expo-platform': { type: 'string', default: 'all' },
+			        'desktop-mode': { type: 'string', default: 'none' },
+			        'release-message': { type: 'string', default: '' },
+			        'npm-mode': { type: 'string', default: 'pack+publish' },
+			        'npm-run-tests': { type: 'string', default: 'auto' },
+			        'npm-server-runner-dir': { type: 'string', default: 'packages/relay-server' },
+			        'sync-dev-from-main': { type: 'string', default: 'true' },
+			        'allow-dirty': { type: 'string', default: 'false' },
+			        'dry-run': { type: 'boolean', default: false },
+			        'secrets-source': { type: 'string', default: 'auto' },
+			        'keychain-service': { type: 'string', default: 'happier/pipeline' },
+			        'keychain-account': { type: 'string', default: '' },
+			      },
+			      allowPositionals: false,
+			    });
+
+			    const action = String(values.confirm ?? '').trim();
+			    if (!action) fail('--confirm is required (e.g. "release preview from dev")');
+			    if (action !== 'release preview from dev' && action !== 'release dev to main' && action !== 'reset main from dev') {
+			      fail(`Unsupported --confirm action: ${action}`);
+			    }
+
+			    const repository = String(values.repository ?? '').trim();
+			    if (!repository) fail('--repository is required (e.g. happier-dev/happier)');
+
+			    const deployEnvironment = String(values['deploy-environment'] ?? '').trim();
+			    if (!isDeployEnvironment(deployEnvironment)) {
+			      fail(`--deploy-environment must be 'production' or 'preview' (got: ${deployEnvironment || '<empty>'})`);
+			    }
+			    if (deployEnvironment === 'preview' && action !== 'release preview from dev') {
+			      fail('Confirmation mismatch for preview releases. Expected: "release preview from dev"');
+			    }
+			    if (deployEnvironment === 'production' && action === 'release preview from dev') {
+			      fail('Confirmation mismatch for production releases. Expected: "release dev to main" or "reset main from dev"');
+			    }
+
+			    const deployTargets = parseCsvList(String(values['deploy-targets'] ?? ''));
+			    if (deployTargets.length === 0) {
+			      fail('--deploy-targets must not be empty');
+			    }
+			    for (const t of deployTargets) {
+			      if (!isReleaseTarget(t)) {
+			        fail(
+			          `--deploy-targets contains unsupported target '${t}' (supported: ui,server,website,docs,cli,stack,server_runner)`,
+			        );
+			      }
+			    }
+
+			    const dryRun = values['dry-run'] === true;
+			    const allowDirty = parseBoolString(values['allow-dirty'], '--allow-dirty');
+			    if (!dryRun) assertCleanWorktree({ cwd: repoRoot, allowDirty });
+			    assertNoStagedChanges({ cwd: repoRoot, allowDirty, dryRun });
+
+			    const forceDeploy = parseBoolString(values['force-deploy'], '--force-deploy');
+			    const bumpPreset = String(values.bump ?? '').trim() || 'none';
+			    const bumpAppOverride = String(values['bump-app-override'] ?? '').trim() || 'preset';
+			    const bumpCliOverride = String(values['bump-cli-override'] ?? '').trim() || 'preset';
+			    const bumpStackOverride = String(values['bump-stack-override'] ?? '').trim() || 'preset';
+
+			    const uiExpoAction = String(values['ui-expo-action'] ?? '').trim() || 'none';
+			    const uiExpoBuilder = String(values['ui-expo-builder'] ?? '').trim() || 'eas_cloud';
+			    const uiExpoProfileRaw = String(values['ui-expo-profile'] ?? '').trim() || 'auto';
+			    const uiExpoPlatform = String(values['ui-expo-platform'] ?? '').trim() || 'all';
+			    const desktopMode = String(values['desktop-mode'] ?? '').trim() || 'none';
+			    const syncDevFromMain = parseBoolString(values['sync-dev-from-main'], '--sync-dev-from-main');
+
+			    for (const [name, v] of [
+			      ['--bump', bumpPreset],
+			      ['--bump-app-override', bumpAppOverride],
+			      ['--bump-cli-override', bumpCliOverride],
+			      ['--bump-stack-override', bumpStackOverride],
+			    ]) {
+			      if (!['none', 'patch', 'minor', 'major', 'preset'].includes(v)) {
+			        fail(`${name} must be one of: none, patch, minor, major${name === '--bump' ? '' : ', preset'} (got: ${v})`);
+			      }
+			    }
+			    if (!['none', 'ota', 'native', 'native_submit'].includes(uiExpoAction)) {
+			      fail(`--ui-expo-action must be one of: none, ota, native, native_submit (got: ${uiExpoAction})`);
+			    }
+			    if (!['eas_cloud', 'eas_local'].includes(uiExpoBuilder)) {
+			      fail(`--ui-expo-builder must be one of: eas_cloud, eas_local (got: ${uiExpoBuilder})`);
+			    }
+			    if (!['auto', 'preview', 'preview-apk', 'production', 'production-apk'].includes(uiExpoProfileRaw)) {
+			      fail(`--ui-expo-profile must be one of: auto, preview, preview-apk, production, production-apk (got: ${uiExpoProfileRaw})`);
+			    }
+			    if (!['ios', 'android', 'all'].includes(uiExpoPlatform)) {
+			      fail(`--ui-expo-platform must be one of: ios, android, all (got: ${uiExpoPlatform})`);
+			    }
+			    if (!['none', 'build_only', 'build_and_publish'].includes(desktopMode)) {
+			      fail(`--desktop-mode must be one of: none, build_only, build_and_publish (got: ${desktopMode})`);
+			    }
+
+			    const npmMode = String(values['npm-mode'] ?? '').trim() || 'pack+publish';
+			    const npmRunTests = String(values['npm-run-tests'] ?? '').trim() || 'auto';
+			    const npmServerRunnerDir = String(values['npm-server-runner-dir'] ?? '').trim() || 'packages/relay-server';
+			    if (npmMode !== 'pack' && npmMode !== 'pack+publish') {
+			      fail(`--npm-mode must be 'pack' or 'pack+publish' (got: ${npmMode})`);
+			    }
+
+			    const { env, sources } = loadPipelineEnv({ repoRoot, deployEnvironment });
+			    const secretsSourceRaw = String(values['secrets-source'] ?? '').trim();
+			    const secretsSource =
+			      secretsSourceRaw === 'auto' || secretsSourceRaw === 'env' || secretsSourceRaw === 'keychain'
+			        ? secretsSourceRaw
+			        : 'auto';
+			    if (secretsSourceRaw && secretsSource !== secretsSourceRaw) {
+			      fail(`--secrets-source must be 'auto', 'env', or 'keychain' (got: ${secretsSourceRaw})`);
+			    }
+
+			    const keychainService = String(values['keychain-service'] ?? '').trim() || 'happier/pipeline';
+			    const keychainAccount = String(values['keychain-account'] ?? '').trim() || undefined;
+			    const { env: mergedEnv, usedKeychain } = loadSecrets({
+			      baseEnv: env,
+			      secretsSource,
+			      keychainService,
+			      keychainAccount,
+			    });
+			    if (sources.length > 0) {
+			      console.log(`[pipeline] using env sources: ${sources.join(', ')}`);
+			      console.log('[pipeline] warning: env-file mode is for fast local iteration; prefer Keychain bundle for long-term use.');
+			    }
+			    if (usedKeychain) {
+			      console.log(`[pipeline] loaded secrets from Keychain service '${keychainService}'`);
+			    }
+
+			    /** @type {Record<string, string>} */
+			    const releaseEnv = {
+			      ...mergedEnv,
+			      GH_REPO: mergedEnv.GH_REPO ?? repository,
+			      GITHUB_REPOSITORY: mergedEnv.GITHUB_REPOSITORY ?? repository,
+			    };
+
+			    const releaseMessage = String(values['release-message'] ?? '').trim();
+			    console.log(`[pipeline] release: environment=${deployEnvironment} confirm=${action}`);
+
+			    // Ensure all preview release steps compute the same preview.<run>.<attempt> suffix when running locally.
+			    if (deployEnvironment === 'preview' && !String(releaseEnv.GITHUB_RUN_NUMBER ?? '').trim()) {
+			      const runNumber = String(Math.floor(Date.now() / 1000));
+			      releaseEnv.GITHUB_RUN_NUMBER = runNumber;
+			      if (!String(releaseEnv.GITHUB_RUN_ATTEMPT ?? '').trim()) {
+			        releaseEnv.GITHUB_RUN_ATTEMPT = '1';
+			      }
+			      console.log(
+			        `[pipeline] preview version suffix: preview.${releaseEnv.GITHUB_RUN_NUMBER}.${releaseEnv.GITHUB_RUN_ATTEMPT}`,
+			      );
+			    }
+
+				    // Plan: compute changed components (main..dev) and resolve bump/publish plan.
+				    console.log('[pipeline] release: fetching origin main/dev for plan');
+				    const fetchTagsArg = dryRun ? '--no-tags' : '--tags';
+				    execFileSync('git', ['fetch', 'origin', 'main', 'dev', '--prune', fetchTagsArg], {
+				      cwd: repoRoot,
+				      env: process.env,
+				      stdio: 'inherit',
+				      timeout: 120_000,
+				    });
+
+			    const currentBranch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+			      cwd: repoRoot,
+			      env: process.env,
+			      encoding: 'utf8',
+			      stdio: ['ignore', 'pipe', 'pipe'],
+			      timeout: 10_000,
+			    }).trim();
+			    if (currentBranch !== 'dev') {
+			      fail(`Local release expects to run from branch 'dev' (current: ${currentBranch}).`);
+			    }
+
+			    const devSha = execFileSync('git', ['rev-parse', 'HEAD'], {
+			      cwd: repoRoot,
+			      env: process.env,
+			      encoding: 'utf8',
+			      stdio: ['ignore', 'pipe', 'pipe'],
+			      timeout: 10_000,
+			    }).trim();
+			    const mainSha = execFileSync('git', ['rev-parse', 'origin/main'], {
+			      cwd: repoRoot,
+			      env: process.env,
+			      encoding: 'utf8',
+			      stdio: ['ignore', 'pipe', 'pipe'],
+			      timeout: 10_000,
+			    }).trim();
+
+			    const changedRaw = runJsonScript({
+			      repoRoot,
+			      env: { ...process.env },
+			      scriptRel: 'scripts/pipeline/release/compute-changed-components.mjs',
+			      args: ['--base', mainSha, '--head', devSha],
+			    });
+
+			    const changed = {
+			      changed_ui: String(changedRaw?.changed_ui ?? '').trim() === 'true',
+			      changed_cli: String(changedRaw?.changed_cli ?? '').trim() === 'true',
+			      changed_server: String(changedRaw?.changed_server ?? '').trim() === 'true',
+			      changed_website: String(changedRaw?.changed_website ?? '').trim() === 'true',
+			      changed_docs: String(changedRaw?.changed_docs ?? '').trim() === 'true',
+			      changed_shared: String(changedRaw?.changed_shared ?? '').trim() === 'true',
+			      changed_stack: String(changedRaw?.changed_stack ?? '').trim() === 'true',
+			    };
+
+			    const bumpPlanRaw = runJsonScript({
+			      repoRoot,
+			      env: { ...process.env },
+			      scriptRel: 'scripts/pipeline/release/resolve-bump-plan.mjs',
+			      args: [
+			        '--environment',
+			        deployEnvironment,
+			        '--bump-preset',
+			        bumpPreset,
+			        '--bump-app-override',
+			        bumpAppOverride,
+			        '--bump-cli-override',
+			        bumpCliOverride,
+			        '--bump-stack-override',
+			        bumpStackOverride,
+			        '--deploy-targets',
+			        deployTargets.join(','),
+			        '--changed-ui',
+			        changed.changed_ui ? 'true' : 'false',
+			        '--changed-cli',
+			        changed.changed_cli ? 'true' : 'false',
+			        '--changed-stack',
+			        changed.changed_stack ? 'true' : 'false',
+			        '--changed-server',
+			        changed.changed_server ? 'true' : 'false',
+			        '--changed-website',
+			        changed.changed_website ? 'true' : 'false',
+			        '--changed-shared',
+			        changed.changed_shared ? 'true' : 'false',
+			      ],
+			    });
+
+			    const bumpPlan = {
+			      bump_app: String(bumpPlanRaw?.bump_app ?? 'none'),
+			      bump_cli: String(bumpPlanRaw?.bump_cli ?? 'none'),
+			      bump_stack: String(bumpPlanRaw?.bump_stack ?? 'none'),
+			      bump_server: String(bumpPlanRaw?.bump_server ?? 'none'),
+			      bump_website: String(bumpPlanRaw?.bump_website ?? 'none'),
+			      should_bump: String(bumpPlanRaw?.should_bump ?? '').trim() === 'true',
+			      publish_cli: String(bumpPlanRaw?.publish_cli ?? '').trim() === 'true',
+			      publish_stack: String(bumpPlanRaw?.publish_stack ?? '').trim() === 'true',
+			      publish_server: String(bumpPlanRaw?.publish_server ?? '').trim() === 'true',
+			    };
+
+			    console.log('[pipeline] release plan: changed components (main..dev)');
+			    for (const [k, v] of Object.entries(changed)) {
+			      console.log(`- ${k.replace(/^changed_/, '')}: ${v}`);
+			    }
+			    console.log('[pipeline] release plan: bump/publish');
+			    console.log(
+			      `- bump_app=${bumpPlan.bump_app} bump_server=${bumpPlan.bump_server} bump_website=${bumpPlan.bump_website} bump_cli=${bumpPlan.bump_cli} bump_stack=${bumpPlan.bump_stack}`,
+			    );
+			    console.log(
+			      `- publish_cli=${bumpPlan.publish_cli} publish_stack=${bumpPlan.publish_stack} publish_server=${bumpPlan.publish_server}`,
+			    );
+
+			    /**
+			     * @param {string} sourceRef
+			     */
+			    const computeDeployPlan = (sourceRef) =>
+			      runJsonScript({
+			        repoRoot,
+			        env: { ...process.env },
+			        scriptRel: 'scripts/pipeline/release/compute-deploy-plan.mjs',
+			        args: [
+			          '--deploy-environment',
+			          deployEnvironment,
+			          '--source-ref',
+			          sourceRef,
+			          '--force-deploy',
+			          forceDeploy ? 'true' : 'false',
+			          '--deploy-ui',
+			          deployEnvironment === 'production' && deployTargets.includes('ui') ? 'true' : 'false',
+			          '--deploy-server',
+			          deployTargets.includes('server') ? 'true' : 'false',
+			          '--deploy-website',
+			          deployTargets.includes('website') ? 'true' : 'false',
+			          '--deploy-docs',
+			          deployTargets.includes('docs') ? 'true' : 'false',
+			        ],
+			      });
+
+			    if (dryRun) {
+			      const sourceRef = deployEnvironment === 'production' ? 'main' : 'dev';
+			      const deployPlan = computeDeployPlan(sourceRef);
+			      const uiExpoProfile = uiExpoProfileRaw === 'auto' ? deployEnvironment : uiExpoProfileRaw;
+			      const predicted = computeReleaseExecutionPlan({
+			        environment: deployEnvironment,
+			        dryRun: false,
+			        forceDeploy,
+			        deployTargets,
+			        uiExpoAction,
+			        desktopMode,
+			        changed,
+			        bumpPlan,
+			        deployPlan,
+			      });
+
+			      console.log('[pipeline] dry-run: would run');
+			      for (const [k, v] of Object.entries(predicted)) {
+			        console.log(`- ${k}: ${v}`);
+			      }
+			      if (uiExpoAction !== 'none') {
+			        console.log(
+			          `[pipeline] dry-run: ui expo action configured (action=${uiExpoAction} builder=${uiExpoBuilder} platform=${uiExpoPlatform} profile=${uiExpoProfile})`,
+			        );
+			      }
+			      if (desktopMode !== 'none') {
+			        console.log(`[pipeline] dry-run: desktop mode configured (${desktopMode}); use GitHub Actions for full matrix builds.`);
+			      }
+			      return;
+			    }
+
+			    // Apply bumps (dev commit) if requested.
+			    if (bumpPlan.should_bump) {
+			      console.log('[pipeline] release: apply version bumps (dev)');
+			      runReleaseBumpVersionsDev({
+			        repoRoot,
+			        env: { ...process.env },
+			        dryRun: false,
+			        args: [
+			          '--bump-app',
+			          bumpPlan.bump_app,
+			          '--bump-server',
+			          bumpPlan.bump_server,
+			          '--bump-website',
+			          bumpPlan.bump_website,
+			          '--bump-cli',
+			          bumpPlan.bump_cli,
+			          '--bump-stack',
+			          bumpPlan.bump_stack,
+			        ],
+			      });
+			    }
+
+			    // Promote main from dev for production.
+			    if (deployEnvironment === 'production') {
+			      const promoteMode = action === 'reset main from dev' ? 'reset' : 'fast_forward';
+			      const allowReset = action === 'reset main from dev' ? 'true' : 'false';
+			      const confirmPhrase = action === 'reset main from dev' ? 'reset main from dev' : 'promote main from dev';
+			      console.log(`[pipeline] release: promote main from dev (mode=${promoteMode})`);
+			      runGithubPromoteBranch({
+			        repoRoot,
+			        env: releaseEnv,
+			        dryRun: false,
+			        args: [
+			          '--source',
+			          'dev',
+			          '--target',
+			          'main',
+			          '--mode',
+			          promoteMode,
+			          '--allow-reset',
+			          allowReset,
+			          '--confirm',
+			          confirmPhrase,
+			        ],
+			      });
+			    }
+
+			    const releaseSourceRef = deployEnvironment === 'production' ? 'main' : 'dev';
+			    const deployPlan = computeDeployPlan(releaseSourceRef);
+
+			    const execution = computeReleaseExecutionPlan({
+			      environment: deployEnvironment,
+			      dryRun: false,
+			      forceDeploy,
+			      deployTargets,
+			      uiExpoAction,
+			      desktopMode,
+			      changed,
+			      bumpPlan,
+			      deployPlan,
+			    });
+
+			    console.log('[pipeline] release: execution plan');
+			    for (const [k, v] of Object.entries(execution)) {
+			      console.log(`- ${k}: ${v}`);
+			    }
+
+			    // Expo actions (handled via promote-ui in GitHub; run directly here).
+			    const uiExpoProfile = uiExpoProfileRaw === 'auto' ? deployEnvironment : uiExpoProfileRaw;
+			    if (uiExpoAction === 'ota') {
+			      console.log(`[pipeline] release: expo ota (${deployEnvironment})`);
+			      runExpoOtaUpdate({
+			        repoRoot,
+			        env: releaseEnv,
+			        dryRun: false,
+			        args: [
+			          '--environment',
+			          deployEnvironment,
+			          ...(releaseMessage ? ['--message', releaseMessage] : []),
+			        ],
+			      });
+			    } else if (uiExpoAction === 'native' || uiExpoAction === 'native_submit') {
+			      const buildMode = uiExpoBuilder === 'eas_cloud' ? 'cloud' : 'local';
+			      const actionName = uiExpoAction;
+			      const platforms = uiExpoPlatform === 'all' ? ['android', 'ios'] : [uiExpoPlatform];
+			      for (const p of platforms) {
+			        const localRuntime = buildMode === 'local' ? (p === 'android' ? 'dagger' : 'host') : '';
+			        console.log(`[pipeline] release: expo ${actionName} (${p}) mode=${buildMode}${localRuntime ? ` runtime=${localRuntime}` : ''}`);
+			        runUiMobileRelease({
+			          repoRoot,
+			          env: releaseEnv,
+			          dryRun: false,
+			          args: [
+			            '--environment',
+			            deployEnvironment,
+			            '--action',
+			            actionName,
+			            '--platform',
+			            p,
+			            '--profile',
+			            uiExpoProfile,
+			            ...(buildMode === 'cloud' ? ['--native-build-mode', 'cloud'] : ['--native-build-mode', 'local']),
+			            ...(buildMode === 'local' ? ['--native-local-runtime', localRuntime] : []),
+			            ...(releaseMessage ? ['--release-message', releaseMessage] : []),
+			          ],
+			        });
+			      }
+			    }
+
+			    if (desktopMode !== 'none') {
+			      console.warn('[pipeline] desktop builds are currently recommended via GitHub Actions (build-tauri.yml) for full platform coverage.');
+			    }
+
+			    // Preview-only publishing surfaces.
+			    if (execution.runPublishUiWeb) {
+			      console.log('[pipeline] release: publish ui-web (preview rolling)');
+			      runPublishUiWeb({
+			        repoRoot,
+			        env: releaseEnv,
+			        dryRun: false,
+			        args: [
+			          '--channel',
+			          'preview',
+			          '--allow-stable',
+			          'false',
+			          '--release-message',
+			          releaseMessage,
+			          '--run-contracts',
+			          'auto',
+			          '--check-installers',
+			          'true',
+			        ],
+			      });
+			    }
+			    if (execution.runPublishServerRuntime) {
+			      console.log('[pipeline] release: publish server-runtime (preview rolling)');
+			      runPublishServerRuntime({
+			        repoRoot,
+			        env: releaseEnv,
+			        dryRun: false,
+			        args: [
+			          '--channel',
+			          'preview',
+			          '--allow-stable',
+			          'false',
+			          '--release-message',
+			          releaseMessage,
+			          '--run-contracts',
+			          'auto',
+			          '--check-installers',
+			          'true',
+			        ],
+			      });
+			    }
+			    if (execution.runPublishDocker) {
+			      console.log('[pipeline] release: publish docker images (preview)');
+			      runDockerPublishImages({
+			        repoRoot,
+			        env: releaseEnv,
+			        dryRun: false,
+			        args: [
+			          '--channel',
+			          'preview',
+			          '--push-latest',
+			          'true',
+			          '--build-relay',
+			          execution.dockerBuildRelay ? 'true' : 'false',
+			          '--build-dev-box',
+			          execution.dockerBuildDevBox ? 'true' : 'false',
+			        ],
+			      });
+			    }
+
+			    // CLI/stack rolling binaries (preview/stable based on environment).
+			    const rollingChannel = deployEnvironment === 'production' ? 'stable' : 'preview';
+			    const allowStable = deployEnvironment === 'production' ? 'true' : 'false';
+			    if (execution.runPublishCliBinaries) {
+			      console.log(`[pipeline] release: publish cli binaries (${rollingChannel})`);
+			      runPublishCliBinaries({
+			        repoRoot,
+			        env: releaseEnv,
+			        dryRun: false,
+			        args: [
+			          '--channel',
+			          rollingChannel,
+			          '--allow-stable',
+			          allowStable,
+			          '--release-message',
+			          releaseMessage,
+			          '--run-contracts',
+			          'auto',
+			          '--check-installers',
+			          'true',
+			        ],
+			      });
+			    }
+			    if (execution.runPublishHstackBinaries) {
+			      console.log(`[pipeline] release: publish hstack binaries (${rollingChannel})`);
+			      runPublishHstackBinaries({
+			        repoRoot,
+			        env: releaseEnv,
+			        dryRun: false,
+			        args: [
+			          '--channel',
+			          rollingChannel,
+			          '--allow-stable',
+			          allowStable,
+			          '--release-message',
+			          releaseMessage,
+			          '--run-contracts',
+			          'auto',
+			          '--check-installers',
+			          'true',
+			        ],
+			      });
+			    }
+
+			    // npm packages (preview=next, production=latest)
+			    if (execution.runPublishNpm) {
+			      console.log(`[pipeline] release: npm channel=${deployEnvironment}`);
+			      runNpmReleasePackages({
+			        repoRoot,
+			        env: releaseEnv,
+			        dryRun: false,
+			        args: [
+			          '--channel',
+			          deployEnvironment,
+			          '--publish-cli',
+			          bumpPlan.publish_cli ? 'true' : 'false',
+			          '--publish-stack',
+			          bumpPlan.publish_stack ? 'true' : 'false',
+			          '--publish-server',
+			          bumpPlan.publish_server ? 'true' : 'false',
+			          '--server-runner-dir',
+			          npmServerRunnerDir,
+			          '--run-tests',
+			          npmRunTests,
+			          '--mode',
+			          npmMode,
+			        ],
+			      });
+			    }
+
+			    /**
+			     * @param {'ui'|'server'|'website'|'docs'} component
+			     */
+			    const deployOne = (component) => {
+			      const refName = `deploy/${deployEnvironment}/${component}`;
+			      console.log(`[pipeline] promote deploy branch: ${refName} <= ${releaseSourceRef}`);
+			      runGithubPromoteDeployBranch({
+			        repoRoot,
+			        env: releaseEnv,
+			        dryRun: false,
+			        args: [
+			          '--deploy-environment',
+			          deployEnvironment,
+			          '--component',
+			          component,
+			          '--source-ref',
+			          releaseSourceRef,
+			        ],
+			      });
+
+			      console.log(`[pipeline] trigger deploy webhooks: ${component}`);
+			      runDeployWebhooks({
+			        repoRoot,
+			        env: releaseEnv,
+			        dryRun: false,
+			        args: [
+			          '--environment',
+			          deployEnvironment,
+			          '--component',
+			          component,
+			          '--repository',
+			          repository,
+			          '--ref-name',
+			          refName,
+			        ],
+			      });
+			    };
+
+			    // UI web deploy is production-only under current policy.
+			    if (execution.runDeployUi && deployEnvironment === 'production' && deployTargets.includes('ui')) {
+			      deployOne('ui');
+			    }
+			    if (execution.runDeployServer && deployTargets.includes('server')) {
+			      deployOne('server');
+			    }
+			    if (execution.runDeployWebsite && deployTargets.includes('website')) {
+			      deployOne('website');
+			    }
+			    if (execution.runDeployDocs && deployTargets.includes('docs')) {
+			      deployOne('docs');
+			    }
+
+			    if (deployEnvironment === 'production' && syncDevFromMain) {
+			      console.log('[pipeline] release: sync dev from main');
+			      runGithubPromoteBranch({
+			        repoRoot,
+			        env: releaseEnv,
+			        dryRun: false,
+			        args: [
+			          '--source',
+			          'main',
+			          '--target',
+			          'dev',
+			          '--mode',
+			          'fast_forward',
+			          '--allow-reset',
+			          'false',
+			          '--confirm',
+			          'promote dev from main',
+			        ],
+			      });
+			    }
+
+			    return;
+			  }
 }
 
 main();

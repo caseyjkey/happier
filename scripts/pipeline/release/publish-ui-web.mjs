@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 
 import { prepareMinisignSecretKeyFile } from './lib/binary-release.mjs';
+import { withCurrentVersionLine } from './lib/rolling-release-notes.mjs';
 
 function fail(message) {
   console.error(message);
@@ -22,6 +23,17 @@ function parseBool(value, name) {
   if (raw === 'true') return true;
   if (raw === 'false') return false;
   fail(`${name} must be 'true' or 'false' (got: ${value})`);
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} name
+ * @param {boolean} autoValue
+ */
+function resolveAutoBool(value, name, autoValue) {
+  const raw = String(value ?? '').trim().toLowerCase();
+  if (!raw || raw === 'auto') return autoValue;
+  return parseBool(raw, name);
 }
 
 /**
@@ -123,7 +135,7 @@ async function main() {
       channel: { type: 'string' },
       'allow-stable': { type: 'string', default: 'false' },
       'release-message': { type: 'string', default: '' },
-      'run-contracts': { type: 'string', default: 'true' },
+      'run-contracts': { type: 'string', default: 'auto' },
       'check-installers': { type: 'string', default: 'true' },
       'dry-run': { type: 'boolean', default: false },
     },
@@ -141,7 +153,7 @@ async function main() {
   }
 
   const dryRun = values['dry-run'] === true;
-  const runContracts = parseBool(values['run-contracts'], '--run-contracts');
+  const runContracts = resolveAutoBool(values['run-contracts'], '--run-contracts', process.env.GITHUB_ACTIONS === 'true');
   const checkInstallers = parseBool(values['check-installers'], '--check-installers');
   const releaseMessage = String(values['release-message'] ?? '').trim();
 
@@ -155,7 +167,8 @@ async function main() {
   const tag = channel === 'preview' ? 'ui-web-preview' : 'ui-web-stable';
   const title = channel === 'preview' ? 'Happier UI Web Bundle Preview' : 'Happier UI Web Bundle Stable';
   const prerelease = channel === 'preview' ? 'true' : 'false';
-  const notes = channel === 'preview' ? 'Rolling preview UI web bundle release.' : 'Stable UI web bundle release.';
+  const notesBase = channel === 'preview' ? 'Rolling preview UI web bundle release.' : 'Rolling stable UI web bundle release.';
+  const notes = withCurrentVersionLine(notesBase, uiVersion);
   const versionTag = `ui-web-v${uiVersion}`;
   const versionTitle = `Happier UI Web Bundle v${uiVersion}`;
   const versionNotes =

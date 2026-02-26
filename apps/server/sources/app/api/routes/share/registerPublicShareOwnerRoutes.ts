@@ -12,6 +12,7 @@ import {
 import { createHash } from "crypto";
 import { afterTx, inTx } from "@/storage/inTx";
 import { markAccountChanged } from "@/app/changes/markAccountChanged";
+import { gateRateLimitConfig } from "@/app/api/utils/apiRateLimitPolicy";
 
 export function registerPublicShareOwnerRoutes(app: Fastify): void {
     /**
@@ -20,10 +21,10 @@ export function registerPublicShareOwnerRoutes(app: Fastify): void {
     app.post('/v1/sessions/:sessionId/public-share', {
         preHandler: app.authenticate,
         config: {
-            rateLimit: {
+            rateLimit: gateRateLimitConfig(process.env, {
                 max: 10,
                 timeWindow: '1 minute'
-            }
+            })
         },
         schema: {
             params: z.object({
@@ -48,6 +49,15 @@ export function registerPublicShareOwnerRoutes(app: Fastify): void {
         }
 
         const result = await inTx(async (tx) => {
+            const session = await tx.session.findUnique({
+                where: { id: sessionId },
+                select: { encryptionMode: true },
+            });
+            if (!session) {
+                return { type: 'error' as const, error: 'session not found' as const };
+            }
+            const sessionEncryptionMode: "e2ee" | "plain" = session.encryptionMode === "plain" ? "plain" : "e2ee";
+
             const existing = await tx.publicSessionShare.findUnique({
                 where: { sessionId }
             });
@@ -57,7 +67,7 @@ export function registerPublicShareOwnerRoutes(app: Fastify): void {
 
             if (existing) {
                 const shouldRotateToken = typeof token === 'string' && token.length > 0;
-                if (shouldRotateToken && !encryptedDataKey) {
+                if (shouldRotateToken && sessionEncryptionMode === "e2ee" && !encryptedDataKey) {
                     return { type: 'error' as const, error: 'encryptedDataKey required when rotating token' as const };
                 }
                 const nextTokenHash = shouldRotateToken ? createHash('sha256').update(token!, 'utf8').digest() : null;
@@ -66,7 +76,11 @@ export function registerPublicShareOwnerRoutes(app: Fastify): void {
                     where: { sessionId },
                     data: {
                         ...(nextTokenHash ? { tokenHash: nextTokenHash } : {}),
-                        ...(encryptedDataKey ? { encryptedDataKey: new Uint8Array(Buffer.from(encryptedDataKey, 'base64')) } : {}),
+                        ...(sessionEncryptionMode === "plain"
+                            ? { encryptedDataKey: null }
+                            : encryptedDataKey
+                                ? { encryptedDataKey: new Uint8Array(Buffer.from(encryptedDataKey, 'base64')) }
+                                : {}),
                         expiresAt: expiresAt ? new Date(expiresAt) : null,
                         maxUses: maxUses ?? null,
                         isConsentRequired: isConsentRequired ?? false,
@@ -77,7 +91,7 @@ export function registerPublicShareOwnerRoutes(app: Fastify): void {
                 if (!token) {
                     return { type: 'error' as const, error: 'token required' as const };
                 }
-                if (!encryptedDataKey) {
+                if (sessionEncryptionMode === "e2ee" && !encryptedDataKey) {
                     return { type: 'error' as const, error: 'encryptedDataKey required' as const };
                 }
                 const tokenHash = createHash('sha256').update(token, 'utf8').digest();
@@ -87,7 +101,10 @@ export function registerPublicShareOwnerRoutes(app: Fastify): void {
                         sessionId,
                         createdByUserId: userId,
                         tokenHash,
-                        encryptedDataKey: new Uint8Array(Buffer.from(encryptedDataKey, 'base64')),
+                        encryptedDataKey:
+                            sessionEncryptionMode === "plain"
+                                ? null
+                                : new Uint8Array(Buffer.from(encryptedDataKey!, 'base64')),
                         expiresAt: expiresAt ? new Date(expiresAt) : null,
                         maxUses: maxUses ?? null,
                         isConsentRequired: isConsentRequired ?? false

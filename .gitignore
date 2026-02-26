@@ -79,4 +79,14 @@ notes/
 .project/qa/evidence-snapshots/
 .project/qa/locks/
 .project/qa/score-history/
+.happier/local/
 /output
+
+# Claude Code cache
+.claude/cache/
+
+# Android build artifacts
+packages/*/android/build/
+/.tmp
+/packages/tests/playwright-report/
+/packages/tests/test-results/

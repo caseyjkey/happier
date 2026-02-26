@@ -16,83 +16,29 @@ const mocks = vi.hoisted(() => ({
   onSend: vi.fn(),
 }));
 
-vi.mock('react-native', () => ({
-  View: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
-    React.createElement('View', props, props.children),
-  Text: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
-    React.createElement('Text', props, props.children),
-  Pressable: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
-    React.createElement('Pressable', props, props.children),
-  ScrollView: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
-    React.createElement('ScrollView', props, props.children),
-  ActivityIndicator: (props: Record<string, unknown>) => React.createElement('ActivityIndicator', props, null),
-  Platform: { OS: 'web', select: (v: any) => v.web ?? v.default ?? null },
-  useWindowDimensions: () => ({ width: 900, height: 600 }),
-  Dimensions: {
-    get: () => ({ width: 900, height: 600, scale: 1, fontScale: 1 }),
-  },
-}));
+vi.mock('react-native', async () => {
+  const rn = await import('@/dev/reactNativeStub');
+  return {
+    ...rn,
+    View: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
+      React.createElement('View', props, props.children),
+    Text: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
+      React.createElement('Text', props, props.children),
+    Pressable: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
+      React.createElement('Pressable', props, props.children),
+    ScrollView: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
+      React.createElement('ScrollView', props, props.children),
+    ActivityIndicator: (props: Record<string, unknown>) => React.createElement('ActivityIndicator', props, null),
+    Platform: { ...rn.Platform, OS: 'web', select: (v: any) => v.web ?? v.default ?? null },
+    useWindowDimensions: () => ({ width: 900, height: 600 }),
+    Dimensions: {
+      get: () => ({ width: 900, height: 600, scale: 1, fontScale: 1 }),
+    },
+  };
+});
 
-vi.mock('react-native-unistyles', () => ({
-  StyleSheet: {
-    create: (styles: any) => {
-      const theme = {
-        colors: {
-          input: { background: '#fff' },
-          button: {
-            primary: { background: '#000', tint: '#fff', disabled: '#999' },
-            secondary: { tint: '#000', surface: '#fff' },
-          },
-          radio: { active: '#000', inactive: '#ddd', dot: '#000' },
-          text: '#000',
-          textSecondary: '#666',
-          textLink: '#06f',
-          divider: '#ddd',
-          surface: '#fff',
-          shadow: { color: '#000' },
-          success: '#0a0',
-          textDestructive: '#a00',
-          surfacePressed: '#eee',
-          permission: {
-            bypass: '#000',
-            plan: '#000',
-            readOnly: '#000',
-            safeYolo: '#000',
-            yolo: '#000',
-          },
-        },
-      };
-      return typeof styles === 'function' ? styles(theme) : styles;
-    },
-  },
-  useUnistyles: () => ({
-    theme: {
-      colors: {
-        input: { background: '#fff' },
-        button: {
-          primary: { background: '#000', tint: '#fff', disabled: '#999' },
-          secondary: { tint: '#000', surface: '#fff' },
-        },
-        radio: { active: '#000', inactive: '#ddd', dot: '#000' },
-        text: '#000',
-        textSecondary: '#666',
-        textLink: '#06f',
-        divider: '#ddd',
-        surface: '#fff',
-        shadow: { color: '#000' },
-        success: '#0a0',
-        textDestructive: '#a00',
-        surfacePressed: '#eee',
-        permission: {
-          bypass: '#000',
-          plan: '#000',
-          readOnly: '#000',
-          safeYolo: '#000',
-          yolo: '#000',
-        },
-      },
-    },
-  }),
+vi.mock('@/sync/store/hooks', () => ({
+    useLocalSetting: () => 1,
 }));
 
 vi.mock('@expo/vector-icons', () => ({
@@ -217,6 +163,7 @@ vi.mock('@/components/ui/scroll/useScrollEdgeFades', () => ({
     onViewportLayout: () => {},
     onContentSizeChange: () => {},
     onScroll: () => {},
+    onMomentumScrollEnd: () => {},
   }),
 }));
 

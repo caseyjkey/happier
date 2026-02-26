@@ -68,6 +68,7 @@ jobs:
         uses: ./.github/actions/release-actor-guard
         with:
           team_slug: release-admins
+          trusted_actors: happier-release-bot[bot]
           app_id: ${{ secrets.RELEASE_BOT_APP_ID }}
           private_key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
 
@@ -109,7 +110,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ "$EVENT_NAME" != "workflow_dispatch" ] && [ "$EVENT_NAME" != "workflow_call" ]; then
+          # Called workflows inherit `github.event_name` from the caller (e.g. `push`), so we must accept it here.
+          if [ "$EVENT_NAME" != "workflow_dispatch" ] && [ "$EVENT_NAME" != "workflow_call" ] && [ "$EVENT_NAME" != "push" ]; then
             echo "Unsupported event for deploy workflow: $EVENT_NAME" >&2
             exit 1
           fi
@@ -153,6 +155,7 @@ jobs:
 
       - name: Trigger deploy webhook(s)
         env:
+          GH_TOKEN: ${{ github.token }}
           CF_WEBHOOK_DEPLOY_CLIENT_ID: ${{ secrets.CF_WEBHOOK_DEPLOY_CLIENT_ID }}
           CF_WEBHOOK_DEPLOY_CLIENT_SECRET: ${{ secrets.CF_WEBHOOK_DEPLOY_CLIENT_SECRET }}
           DEPLOY_WEBHOOK_URL: ${{ vars.DEPLOY_WEBHOOK_URL != '' && vars.DEPLOY_WEBHOOK_URL || secrets.DEPLOY_WEBHOOK_URL }}
@@ -163,8 +166,8 @@ jobs:
           HAPPIER_SERVER_WORKER_DEPLOY_WEBHOOKS: ${{ vars.HAPPIER_SERVER_WORKER_DEPLOY_WEBHOOKS != '' && vars.HAPPIER_SERVER_WORKER_DEPLOY_WEBHOOKS || secrets.HAPPIER_SERVER_WORKER_DEPLOY_WEBHOOKS }}
         run: |
           set -euo pipefail
-          node scripts/pipeline/deploy/trigger-webhooks.mjs \
-            --environment "${{ steps.target.outputs.environment }}" \
+          node scripts/pipeline/run.mjs deploy \
+            --deploy-environment "${{ steps.target.outputs.environment }}" \
             --component "${{ steps.target.outputs.component }}" \
             --repository "${{ github.repository }}" \
             --ref-name "deploy/${{ steps.target.outputs.environment }}/${{ steps.target.outputs.component }}"

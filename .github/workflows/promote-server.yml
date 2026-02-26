@@ -222,21 +222,17 @@ jobs:
         if: inputs.run_tests
         run: yarn --cwd apps/server test
 
-      - name: Commit version bump (source ref)
-        if: steps.bump_server.outputs.skipped != 'true'
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add apps/server/package.json packages/relay-server/package.json
-          git commit -m "chore(release): bump server to v${{ steps.bump_server.outputs.version }}"
-
-      - name: Push source ref (only for branches)
+      - name: Commit + push version bump (pipeline)
         if: steps.bump_server.outputs.skipped != 'true'
         run: |
           set -euo pipefail
           src="${{ steps.resolve.outputs.ref }}"
-          git push origin "HEAD:refs/heads/$src"
+          node scripts/pipeline/run.mjs github-commit-and-push \
+            --paths "apps/server/package.json,packages/relay-server/package.json" \
+            --allow-missing false \
+            --message "chore(release): bump server to v${{ steps.bump_server.outputs.version }}" \
+            --push-ref "${src}" \
+            --push-mode auto
 
       - name: Bootstrap minisign
         if: inputs.publish_runtime_release == true
@@ -312,7 +308,7 @@ jobs:
             title="Happier Server Stable"
             prerelease="false"
           fi
-          node scripts/pipeline/github/publish-release.mjs \
+          node scripts/pipeline/run.mjs github-publish-release \
             --tag "${tag}" \
             --title "${title}" \
             --target-sha "$(git rev-parse HEAD)" \
@@ -334,7 +330,7 @@ jobs:
           version="$(node -p 'require("./apps/server/package.json").version' | tr -d '\n')"
           tag="server-v${version}"
           title="Happier Server v${version}"
-          node scripts/pipeline/github/publish-release.mjs \
+          node scripts/pipeline/run.mjs github-publish-release \
             --tag "${tag}" \
             --title "${title}" \
             --target-sha "$(git rev-parse HEAD)" \
@@ -344,20 +340,44 @@ jobs:
             --assets-dir "dist/release-assets/server" \
             --clobber "true"
 
+      - name: Resolve deploy branch SHA (before)
+        id: deploy_before
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ref="deploy/${{ inputs.environment }}/server"
+          sha="$(gh api "repos/${{ github.repository }}/git/ref/heads/${ref}" --jq .object.sha 2>/dev/null || true)"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
       - name: Promote source ref to deploy branch
         env:
           GH_TOKEN: ${{ steps.app_token.outputs.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          node scripts/pipeline/github/promote-deploy-branch.mjs \
+          node scripts/pipeline/run.mjs promote-deploy-branch \
             --deploy-environment "${{ inputs.environment }}" \
             --component server \
             --sha "$(git rev-parse HEAD)" \
             --summary-file "${GITHUB_STEP_SUMMARY}"
 
-      - name: Trigger deploy webhook(s)
+      - name: Resolve deploy branch SHA (after)
+        id: deploy_after
         env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ref="deploy/${{ inputs.environment }}/server"
+          sha="$(gh api "repos/${{ github.repository }}/git/ref/heads/${ref}" --jq .object.sha 2>/dev/null || true)"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger deploy webhook(s) (force_deploy, no branch change)
+        if: inputs.force_deploy && steps.deploy_before.outputs.sha == steps.deploy_after.outputs.sha
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
           CF_WEBHOOK_DEPLOY_CLIENT_ID: ${{ secrets.CF_WEBHOOK_DEPLOY_CLIENT_ID }}
           CF_WEBHOOK_DEPLOY_CLIENT_SECRET: ${{ secrets.CF_WEBHOOK_DEPLOY_CLIENT_SECRET }}
           DEPLOY_WEBHOOK_URL: ${{ vars.DEPLOY_WEBHOOK_URL != '' && vars.DEPLOY_WEBHOOK_URL || secrets.DEPLOY_WEBHOOK_URL }}
@@ -365,8 +385,15 @@ jobs:
           HAPPIER_SERVER_WORKER_DEPLOY_WEBHOOKS: ${{ vars.HAPPIER_SERVER_WORKER_DEPLOY_WEBHOOKS != '' && vars.HAPPIER_SERVER_WORKER_DEPLOY_WEBHOOKS || secrets.HAPPIER_SERVER_WORKER_DEPLOY_WEBHOOKS }}
         run: |
           set -euo pipefail
-          node scripts/pipeline/deploy/trigger-webhooks.mjs \
-            --environment "${{ inputs.environment }}" \
+          node scripts/pipeline/run.mjs deploy \
+            --deploy-environment "${{ inputs.environment }}" \
             --component "server" \
             --repository "${{ github.repository }}" \
             --ref-name "deploy/${{ inputs.environment }}/server"
+
+      - name: Deploy note
+        run: |
+          set -euo pipefail
+          echo "Deployment is triggered automatically by pushes to deploy/${{ inputs.environment }}/server." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- deploy_branch_sha: \`${{ steps.deploy_after.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"

@@ -4,7 +4,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { Text } from '@/components/ui/text/StyledText';
+import { Text } from '@/components/ui/text/Text';
 
 export type BugReportDiagnosticsPreviewArtifact = {
   filename: string;
@@ -116,8 +116,13 @@ export function BugReportDiagnosticsPreviewModal(props: Readonly<{
   const maxHeight = Math.max(240, Math.floor(window.height - (insets.top + insets.bottom + 96)));
   const [selected, setSelected] = React.useState<BugReportDiagnosticsPreviewArtifact | null>(null);
 
+  // IMPORTANT (native Android):
+  // When the card only has a `maxHeight`, React Native can lay it out with an
+  // unconstrained height. In that case, the ScrollView with `flex: 1` may
+  // collapse to ~0px, leaving only the header visible.
+  // Give the card a concrete height so the ScrollView can measure reliably.
   return (
-    <View style={[s.card, { maxHeight }]}>
+    <View style={[s.card, { height: maxHeight, maxHeight }]}>
       <View style={s.header}>
         <View style={s.headerLeft}>
           {selected ? (

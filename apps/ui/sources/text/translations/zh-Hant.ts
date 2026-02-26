@@ -131,6 +131,9 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
         enterSecretKey: '請輸入金鑰',
         invalidSecretKey: '無效的金鑰，請檢查後重試。',
         enterUrlManually: '手動輸入 URL',
+        externalAuthVerifiedTitle: ({ provider }: { provider: string }) => `${provider} 驗證完成`,
+        externalAuthVerifiedBody: ({ provider }: { provider: string }) =>
+            `我們找到了與 ${provider} 關聯的既有 Happier 帳戶。要在此裝置上完成登入，請使用 QR code 或你的密鑰來還原帳戶金鑰。`,
         linkNewDeviceTitle: '連結新裝置',
         linkNewDeviceSubtitle: '掃描新裝置上顯示的 QR Code 以將其連結至此帳戶',
         linkNewDeviceQrInstructions: '在新裝置上開啟 Happier 並顯示 QR Code',
@@ -242,6 +245,19 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
         compactSessionViewDescription: '以更緊湊的版面配置顯示活躍工作階段',
         compactSessionViewMinimal: '極簡緊湊檢視',
         compactSessionViewMinimalDescription: '隱藏頭像並顯示更緊湊的工作階段列版面',
+        text: '文字',
+        textDescription: '調整應用程式內文字大小',
+        textSize: '文字大小',
+        textSizeDescription: '讓文字更大或更小',
+        textSizeOptions: {
+            xxsmall: '超特小',
+            xsmall: '特小',
+            small: '小',
+            default: '預設',
+            large: '大',
+            xlarge: '特大',
+            xxlarge: '超特大',
+        },
     },
 
     settingsFeatures: {
@@ -485,6 +501,8 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
         claudeCodeSessionIdCopied: 'Claude Code 工作階段 ID 已複製到剪貼簿',
         aiProvider: 'AI 提供者',
         failedToCopyClaudeCodeSessionId: '複製 Claude Code 工作階段 ID 失敗',
+        copilotSessionId: 'Copilot 工作階段 ID',
+        copilotSessionIdCopied: 'Copilot 工作階段 ID 已複製到剪貼簿',
         metadataCopied: '中繼資料已複製到剪貼簿',
         failedToCopyMetadata: '複製中繼資料失敗',
         failedToKillSession: '終止工作階段失敗',
@@ -562,6 +580,7 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
             claude: 'Claude',
             codex: 'Codex',
             gemini: 'Gemini',
+            copilot: 'Copilot',
         },
         model: {
             title: '模型',
@@ -729,6 +748,19 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
         file: '檔案',
         fileEmpty: '檔案為空',
         noChanges: '沒有要顯示的更改',
+    },
+
+    settingsNotifications: {
+        foregroundBehavior: {
+            title: '應用程式內通知',
+            footer: '控制您使用應用程式時的通知方式。目前正在檢視的工作階段通知一律會靜音。',
+            full: '完整',
+            fullDescription: '顯示橫幅並播放音效',
+            silent: '靜音',
+            silentDescription: '顯示橫幅但不播放音效',
+            off: '關閉',
+            offDescription: '僅顯示徽章，不顯示橫幅',
+        },
     },
 
     settingsSession: {
@@ -1154,6 +1186,12 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
         signUpWithProvider: ({ provider }: { provider: string }) => `使用 ${provider} 繼續`,
         linkOrRestoreAccount: '連結或恢復帳戶',
         loginWithMobileApp: '使用行動應用程式登入',
+        serverUnavailableTitle: '無法連線到伺服器',
+        serverUnavailableBody: ({ serverUrl }: { serverUrl: string }) =>
+            `無法連線到 ${serverUrl}。請重試或更改伺服器以繼續。`,
+        serverIncompatibleTitle: '伺服器不受支援',
+        serverIncompatibleBody: ({ serverUrl }: { serverUrl: string }) =>
+            `${serverUrl} 回傳了意外的回應。請更新伺服器或更改伺服器以繼續。`,
     },
 
     review: {
@@ -1383,6 +1421,9 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
             message: ({ name }: { name: string }) => `確定要刪除「${name}」嗎？此操作無法復原。`,
             confirm: '刪除',
             cancel: '取消',
+        },
+        aiBackend: {
+            copilotSubtitleExperimental: 'GitHub Copilot CLI（實驗）',
         },
     }
 } as const;

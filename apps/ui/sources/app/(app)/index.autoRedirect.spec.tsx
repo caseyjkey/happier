@@ -2,6 +2,7 @@ import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import renderer, { act } from 'react-test-renderer';
 import { createWelcomeFeaturesResponse } from './index.testHelpers';
+import type { ServerFeaturesSnapshot } from '@/sync/api/capabilities/serverFeaturesClient';
 
 type ReactActEnvironmentGlobal = typeof globalThis & {
     IS_REACT_ACT_ENVIRONMENT?: boolean;
@@ -20,15 +21,18 @@ vi.mock('react-native-safe-area-context', () => ({
 
 const openURL = vi.fn(async () => true);
 let externalSignupUrl = 'https://example.test/oauth';
+let externalLoginUrl = 'https://example.test/oauth-login';
 const getSuppressedUntilMock = vi.fn(async () => 0);
 const setPendingExternalAuthMock = vi.fn(async () => true);
 const clearPendingExternalAuthMock = vi.fn(async () => true);
 
 vi.mock('react-native', () => ({
+    ActivityIndicator: 'ActivityIndicator',
     Text: 'Text',
     View: 'View',
     Image: 'Image',
     useWindowDimensions: () => ({ width: 400, height: 800, scale: 1, fontScale: 1 }),
+    AppState: { addEventListener: vi.fn(() => ({ remove: vi.fn() })) },
     Platform: {
         OS: 'ios',
         select: (spec: Record<string, unknown>) => (spec && Object.prototype.hasOwnProperty.call(spec, 'ios') ? spec.ios : undefined),
@@ -79,6 +83,7 @@ vi.mock('@/auth/providers/registry', () => ({
         id: 'github',
         displayName: 'GitHub',
         getExternalSignupUrl: async () => externalSignupUrl,
+        getExternalLoginUrl: async () => externalLoginUrl,
     }),
 }));
 
@@ -99,15 +104,39 @@ vi.mock('@/sync/api/capabilities/getReadyServerFeatures', () => ({
     getReadyServerFeatures: getServerFeaturesMock,
 }));
 
+const getServerFeaturesSnapshotMock = vi.fn(async (_params?: unknown): Promise<ServerFeaturesSnapshot> => ({
+    status: 'ready',
+    features: createWelcomeFeaturesResponse({
+        signupMethods: [
+            { id: 'anonymous', enabled: false },
+            { id: 'github', enabled: true },
+        ],
+        requiredProviders: ['github'],
+        autoRedirectEnabled: true,
+        autoRedirectProviderId: 'github',
+        providerOffboardingIntervalSeconds: 86400,
+    }),
+}));
+
+vi.mock('@/sync/api/capabilities/serverFeaturesClient', () => ({
+    getServerFeaturesSnapshot: getServerFeaturesSnapshotMock,
+}));
+
+vi.mock('@/sync/domains/server/serverRuntime', () => ({
+    getActiveServerSnapshot: () => ({ serverUrl: 'https://server.test' }),
+}));
+
 describe('/ (welcome) auto redirect', () => {
     beforeEach(() => {
         openURL.mockClear();
         getServerFeaturesMock.mockClear();
+        getServerFeaturesSnapshotMock.mockClear();
         setPendingExternalAuthMock.mockClear();
         clearPendingExternalAuthMock.mockClear();
         getSuppressedUntilMock.mockReset();
         getSuppressedUntilMock.mockResolvedValue(0);
         externalSignupUrl = 'https://example.test/oauth';
+        externalLoginUrl = 'https://example.test/oauth-login';
     });
 
     async function renderWelcomeScreen(): Promise<void> {
@@ -175,6 +204,7 @@ describe('/ (welcome) auto redirect', () => {
     it('does not throw when server features fetch fails', async () => {
         vi.resetModules();
         getServerFeaturesMock.mockRejectedValueOnce(new Error('network'));
+        getServerFeaturesSnapshotMock.mockResolvedValueOnce({ status: 'error', reason: 'network' });
 
         await renderWelcomeScreen();
         expect(openURL).not.toHaveBeenCalled();
@@ -185,5 +215,54 @@ describe('/ (welcome) auto redirect', () => {
         externalSignupUrl = 'javascript:alert(1)';
         await renderWelcomeScreen();
         expect(openURL).not.toHaveBeenCalled();
+    });
+
+    it('auto-starts mTLS login when server enables auth.ui.autoRedirect=mtls', async () => {
+        vi.resetModules();
+        getServerFeaturesSnapshotMock.mockResolvedValueOnce({
+            status: 'ready',
+            features: createWelcomeFeaturesResponse({
+                signupMethods: [{ id: 'anonymous', enabled: false }],
+                loginMethods: [{ id: 'mtls', enabled: true }],
+                autoRedirectEnabled: true,
+                autoRedirectProviderId: 'mtls',
+                providerOffboardingIntervalSeconds: 86400,
+            }),
+        });
+
+        await renderWelcomeScreen();
+        expect(openURL).toHaveBeenCalledWith('https://server.test/v1/auth/mtls/start?returnTo=happier%3A%2F%2F%2Fmtls');
+    });
+
+    it('auto-starts keyless provider login when server enables auth.ui.autoRedirect for a keyless login method', async () => {
+        vi.resetModules();
+        getServerFeaturesSnapshotMock.mockResolvedValueOnce({
+            status: 'ready',
+            features: createWelcomeFeaturesResponse({
+                signupMethods: [{ id: 'anonymous', enabled: false }],
+                loginMethods: [],
+                authMethods: [
+                    {
+                        id: 'key_challenge',
+                        actions: [
+                            { id: 'login', enabled: false, mode: 'keyed' },
+                            { id: 'provision', enabled: false, mode: 'keyed' },
+                        ],
+                        ui: { displayName: 'Device key', iconHint: null },
+                    },
+                    {
+                        id: 'github',
+                        actions: [{ id: 'login', enabled: true, mode: 'keyless' }],
+                        ui: { displayName: 'GitHub', iconHint: 'github' },
+                    },
+                ],
+                autoRedirectEnabled: true,
+                autoRedirectProviderId: 'github',
+                providerOffboardingIntervalSeconds: 86400,
+            }),
+        });
+
+        await renderWelcomeScreen();
+        expect(openURL).toHaveBeenCalledWith('https://example.test/oauth-login');
     });
 });

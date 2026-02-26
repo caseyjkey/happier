@@ -18,7 +18,7 @@ function nodeContainsExactText(node: renderer.ReactTestInstance, value: string):
 function findTextNode(tree: renderer.ReactTestRenderer, value: string): renderer.ReactTestInstance | undefined {
     return tree.root.findAll((node) => (
         typeof node.type === 'string' &&
-        node.type === 'Text' &&
+        String(node.type) === 'Text' &&
         nodeContainsExactText(node, value)
     ))[0];
 }
@@ -26,7 +26,7 @@ function findTextNode(tree: renderer.ReactTestRenderer, value: string): renderer
 function findPressableByLabel(tree: renderer.ReactTestRenderer, label: string): renderer.ReactTestInstance | undefined {
     return tree.root.findAll((node) => (
         typeof node.type === 'string' &&
-        node.type === 'Pressable' &&
+        String(node.type) === 'Pressable' &&
         nodeContainsExactText(node, label)
     ))[0];
 }
@@ -34,13 +34,16 @@ function findPressableByLabel(tree: renderer.ReactTestRenderer, label: string): 
 function findPressableByAccessibilityLabel(tree: renderer.ReactTestRenderer, label: string): renderer.ReactTestInstance | undefined {
     return tree.root.findAll((node) => (
         typeof node.type === 'string' &&
-        node.type === 'Pressable' &&
+        String(node.type) === 'Pressable' &&
         typeof (node.props as any)?.accessibilityLabel === 'string' &&
         (node.props as any).accessibilityLabel === label
     ))[0];
 }
 
-vi.mock('react-native', () => ({
+vi.mock('react-native', async () => {
+    const rn = await import('@/dev/reactNativeStub');
+    return {
+    ...rn,
     View: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
         React.createElement('View', props, props.children),
     Text: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
@@ -50,52 +53,13 @@ vi.mock('react-native', () => ({
     ScrollView: (props: Record<string, unknown> & { children?: React.ReactNode }) =>
         React.createElement('ScrollView', props, props.children),
     ActivityIndicator: (props: Record<string, unknown>) => React.createElement('ActivityIndicator', props, null),
-    Platform: { OS: 'ios', select: (v: any) => v.ios },
+    Platform: { ...rn.Platform, OS: 'ios', select: (v: any) => v.ios },
     useWindowDimensions: () => ({ width: 800, height: 600 }),
     Dimensions: {
         get: () => ({ width: 800, height: 600, scale: 1, fontScale: 1 }),
     },
-}));
-
-vi.mock('react-native-unistyles', () => ({
-    StyleSheet: {
-        create: (styles: any) => {
-            const theme = {
-                colors: {
-                    input: { background: '#fff' },
-                    button: {
-                        primary: { background: '#000', tint: '#fff' },
-                        secondary: { tint: '#000', surface: '#fff' },
-                    },
-                    radio: { active: '#000', inactive: '#ddd' },
-                    text: '#000',
-                    textSecondary: '#666',
-                    divider: '#ddd',
-                    success: '#0a0',
-                    textDestructive: '#a00',
-                },
-            };
-            return typeof styles === 'function' ? styles(theme) : styles;
-        },
-    },
-    useUnistyles: () => ({
-        theme: {
-            colors: {
-                input: { background: '#fff' },
-                button: {
-                    primary: { background: '#000', tint: '#fff' },
-                    secondary: { tint: '#000', surface: '#fff' },
-                },
-                radio: { active: '#000', inactive: '#ddd' },
-                text: '#000',
-                textSecondary: '#666',
-                divider: '#ddd',
-                success: '#0a0',
-                textDestructive: '#a00',
-            },
-        },
-    }),
-}));
+    };
+});
 
 vi.mock('@expo/vector-icons', () => ({
     Ionicons: (props: Record<string, unknown>) => React.createElement('Ionicons', props, null),
@@ -134,7 +98,7 @@ vi.mock('@/sync/domains/state/storage', () => ({
 }));
 
 vi.mock('@/sync/domains/state/storageStore', () => ({
-    getStorage: () => (selector: any) => selector({ sessionMessages: {} }),
+    getStorage: () => (selector: any) => selector({ sessionMessages: {}, localSettings: { uiFontScale: 1 } }),
 }));
 
 vi.mock('@/agents/catalog/catalog', () => ({
@@ -246,6 +210,7 @@ vi.mock('@/components/ui/scroll/useScrollEdgeFades', () => ({
         onViewportLayout: () => {},
         onContentSizeChange: () => {},
         onScroll: () => {},
+        onMomentumScrollEnd: () => {},
     }),
 }));
 

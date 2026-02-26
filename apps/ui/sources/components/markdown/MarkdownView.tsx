@@ -3,7 +3,7 @@ import * as React from 'react';
 import { Pressable, ScrollView, View, Platform } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { StyleSheet } from 'react-native-unistyles';
-import { Text } from '../ui/text/StyledText';
+import { Text } from '../ui/text/Text';
 import { Typography } from '@/constants/Typography';
 import { SimpleSyntaxHighlighter } from '../ui/media/SimpleSyntaxHighlighter';
 import { Modal } from '@/modal';
@@ -527,7 +527,8 @@ const style = StyleSheet.create((theme) => ({
         overflow: 'hidden',
     },
     tableScrollView: {
-        flexGrow: 1,
+        flexGrow: 0,
+        flexShrink: 0,
     },
     tableContent: {
         flexDirection: 'row',

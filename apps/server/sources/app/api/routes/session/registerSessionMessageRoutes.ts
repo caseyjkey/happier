@@ -3,13 +3,80 @@ import { z } from "zod";
 
 import { buildNewMessageUpdate, eventRouter } from "@/app/events/eventRouter";
 import { catchupFollowupFetchesCounter, catchupFollowupReturnedCounter } from "@/app/monitoring/metrics2";
+import { SessionStoredMessageContentSchema } from "@happier-dev/protocol";
 import { createSessionMessage } from "@/app/session/sessionWriteService";
 import { checkSessionAccess } from "@/app/share/accessControl";
 import { db } from "@/storage/db";
 import { randomKeyNaked } from "@/utils/keys/randomKeyNaked";
+import { resolveRouteRateLimit } from "@/app/api/utils/apiRateLimitPolicy";
 import { type Fastify } from "../../types";
 
 export function registerSessionMessageRoutes(app: Fastify) {
+    app.get('/v2/sessions/:sessionId/messages/by-local-id/:localId', {
+        schema: {
+            params: z.object({
+                sessionId: z.string(),
+                localId: z.string().min(1),
+            }),
+            response: {
+                200: z.object({
+                    message: z.object({
+                        id: z.string(),
+                        seq: z.number().int().min(0),
+                        localId: z.string().nullable(),
+                        content: SessionStoredMessageContentSchema,
+                        createdAt: z.number().int().min(0),
+                        updatedAt: z.number().int().min(0),
+                    }).passthrough(),
+                }).passthrough(),
+                404: z.object({ error: z.string() }).passthrough(),
+            },
+        },
+        preHandler: app.authenticate,
+        config: {
+            rateLimit: resolveRouteRateLimit(process.env, {
+                maxEnvKey: "HAPPIER_SESSION_MESSAGES_BY_LOCAL_ID_RATE_LIMIT_MAX",
+                windowEnvKey: "HAPPIER_SESSION_MESSAGES_BY_LOCAL_ID_RATE_LIMIT_WINDOW",
+                defaultMax: 600,
+                defaultWindow: "1 minute",
+            }),
+        },
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { sessionId, localId } = request.params;
+
+        const access = await checkSessionAccess(userId, sessionId);
+        if (!access) {
+            return reply.code(404).send({ error: 'Session not found' });
+        }
+
+        const row = await db.sessionMessage.findUnique({
+            where: { sessionId_localId: { sessionId, localId } },
+            select: {
+                id: true,
+                seq: true,
+                localId: true,
+                content: true,
+                createdAt: true,
+                updatedAt: true,
+            },
+        });
+        if (!row) {
+            return reply.code(404).send({ error: 'Message not found' });
+        }
+
+        return reply.send({
+            message: {
+                id: row.id,
+                seq: row.seq,
+                localId: row.localId,
+                content: row.content,
+                createdAt: row.createdAt.getTime(),
+                updatedAt: row.updatedAt.getTime(),
+            },
+        });
+    });
+
     app.get('/v1/sessions/:sessionId/messages', {
         schema: {
             params: z.object({
@@ -28,7 +95,15 @@ export function registerSessionMessageRoutes(app: Fastify) {
                 }
             }).optional(),
         },
-        preHandler: app.authenticate
+        preHandler: app.authenticate,
+        config: {
+            rateLimit: resolveRouteRateLimit(process.env, {
+                maxEnvKey: "HAPPIER_SESSION_MESSAGES_RATE_LIMIT_MAX",
+                windowEnvKey: "HAPPIER_SESSION_MESSAGES_RATE_LIMIT_WINDOW",
+                defaultMax: 600,
+                defaultWindow: "1 minute",
+            }),
+        },
     }, async (request, reply) => {
         const userId = request.userId;
         const { sessionId } = request.params;
@@ -105,21 +180,29 @@ export function registerSessionMessageRoutes(app: Fastify) {
             params: z.object({
                 sessionId: z.string(),
             }),
-            body: z.object({
-                ciphertext: z.string(),
-                localId: z.string().optional(),
-            }),
-            response: {
-                200: z.object({
-                    didWrite: z.boolean(),
-                    message: z.object({
-                        id: z.string(),
-                        seq: z.number(),
-                        localId: z.string().nullable(),
-                        createdAt: z.number(),
-                    }),
+            body: z.union([
+                z.object({
+                    ciphertext: z.string().min(1),
+                    localId: z.string().optional(),
                 }),
-                400: z.object({ error: z.literal('Invalid parameters') }),
+                z.object({
+                    content: SessionStoredMessageContentSchema,
+                    localId: z.string().optional(),
+                }),
+            ]),
+            response: {
+                200: z
+                    .object({
+                        didWrite: z.boolean(),
+                        message: z.object({
+                            id: z.string(),
+                            seq: z.number().int().min(0),
+                            localId: z.string().nullable(),
+                            createdAt: z.number().int().min(0),
+                        }),
+                    })
+                    .passthrough(),
+                400: z.object({ error: z.literal('Invalid parameters'), code: z.string().optional() }).passthrough(),
                 403: z.object({ error: z.literal('Forbidden') }),
                 404: z.object({ error: z.literal('Session not found') }),
                 500: z.object({ error: z.literal('Failed to create message') }),
@@ -128,7 +211,8 @@ export function registerSessionMessageRoutes(app: Fastify) {
     }, async (request, reply) => {
         const userId = request.userId;
         const { sessionId } = request.params;
-        const { ciphertext, localId } = request.body;
+        const body = request.body as Readonly<{ localId?: string } & ({ ciphertext: string } | { content: PrismaJson.SessionMessageContent })>;
+        const localId = typeof body.localId === "string" ? body.localId : undefined;
 
         const headerKey = request.headers["idempotency-key"];
         const idempotencyKey =
@@ -140,15 +224,27 @@ export function registerSessionMessageRoutes(app: Fastify) {
 
         const effectiveLocalId = localId ?? idempotencyKey ?? null;
 
-        const result = await createSessionMessage({
-            actorUserId: userId,
-            sessionId,
-            ciphertext,
-            localId: effectiveLocalId,
-        });
+        const result =
+            "content" in body
+                ? await createSessionMessage({
+                      actorUserId: userId,
+                      sessionId,
+                      content: body.content,
+                      localId: effectiveLocalId,
+                  })
+                : await createSessionMessage({
+                      actorUserId: userId,
+                      sessionId,
+                      ciphertext: body.ciphertext,
+                      localId: effectiveLocalId,
+                  });
 
         if (!result.ok) {
-            if (result.error === "invalid-params") return reply.code(400).send({ error: "Invalid parameters" });
+            if (result.error === "invalid-params") {
+                const payload: { error: "Invalid parameters"; code?: string } = { error: "Invalid parameters" };
+                if ("code" in result && typeof result.code === "string") payload.code = result.code;
+                return reply.code(400).send(payload);
+            }
             if (result.error === "forbidden") return reply.code(403).send({ error: "Forbidden" });
             if (result.error === "session-not-found") return reply.code(404).send({ error: "Session not found" });
             return reply.code(500).send({ error: "Failed to create message" });

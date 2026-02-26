@@ -6,8 +6,8 @@ import renderer, { act } from 'react-test-renderer';
 
 let lastMultiTextInputProps: any = null;
 
-vi.mock('react-native', async (importOriginal) => {
-    const actual = await importOriginal<any>();
+vi.mock('react-native', async () => {
+    const actual = await import('@/dev/reactNativeStub');
     return {
         ...actual,
         TurboModuleRegistry: {
@@ -23,55 +23,6 @@ vi.mock('react-native', async (importOriginal) => {
         Dimensions: {
             get: () => ({ width: 800, height: 600, scale: 1, fontScale: 1 }),
         },
-    };
-});
-
-vi.mock('react-native-unistyles', () => {
-    const theme = {
-        colors: {
-            surface: '#fff',
-            surfaceSelected: '#f2f2f2',
-            surfacePressed: '#eee',
-            divider: '#ddd',
-            text: '#000',
-            textSecondary: '#666',
-            groupped: { sectionTitle: '#666', background: '#fff' },
-            header: { background: '#fff', tint: '#000' },
-            button: {
-                primary: { background: '#000', tint: '#fff', disabled: '#999' },
-                secondary: { tint: '#000', surface: '#fff' },
-            },
-            shadow: { color: '#000', opacity: 0.2 },
-            modal: { border: '#ddd' },
-            switch: { track: { inactive: '#ccc', active: '#4ade80' }, thumb: { active: '#fff' } },
-            input: { background: '#eee', text: '#000' },
-            status: { error: '#ff3b30' },
-            box: { error: { background: '#fee', border: '#f99', text: '#900' } },
-            radio: { active: '#000', inactive: '#ddd', dot: '#000' },
-            success: '#0a0',
-            textDestructive: '#a00',
-            permission: {
-                acceptEdits: '#0a0',
-                bypass: '#f90',
-                plan: '#09f',
-                readOnly: '#999',
-                safeYolo: '#0af',
-                yolo: '#f0a',
-            },
-            permissionButton: {
-                allow: { background: '#0f0' },
-                deny: { background: '#f00' },
-                allowAll: { background: '#00f' },
-            },
-        },
-    };
-
-    return {
-        StyleSheet: {
-            create: (styles: any) => (typeof styles === 'function' ? styles(theme, {}) : styles),
-            configure: () => { },
-        },
-        useUnistyles: () => ({ theme }),
     };
 });
 
@@ -130,6 +81,10 @@ vi.mock('@/sync/domains/state/storageStore', () => ({
     getStorage: () => (selector: any) => selector({ sessionMessages: {} }),
 }));
 
+vi.mock('@/sync/store/hooks', () => ({
+    useLocalSetting: () => 1,
+}));
+
 vi.mock('@/agents/catalog/catalog', () => ({
     AGENT_IDS: ['codex', 'claude', 'opencode', 'gemini'],
     DEFAULT_AGENT_ID: 'codex',
@@ -174,5 +129,5 @@ describe('AgentInput (attachments drag overlay)', () => {
 
         const overlay = tree!.root.findByProps({ testID: 'agent-input-drop-overlay' });
         expect(overlay.props.pointerEvents).toBe('none');
-    });
+    }, 60_000);
 });

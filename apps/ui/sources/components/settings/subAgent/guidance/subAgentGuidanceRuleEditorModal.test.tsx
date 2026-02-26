@@ -18,24 +18,6 @@ vi.mock('@expo/vector-icons', () => ({
     Ionicons: 'Ionicons',
 }));
 
-vi.mock('react-native-unistyles', () => ({
-    useUnistyles: () => ({
-        theme: {
-            colors: {
-                textSecondary: '#999',
-                text: '#111',
-                textLink: '#00f',
-                textDestructive: '#f00',
-                surface: '#fff',
-                surfaceHigh: '#fafafa',
-                divider: '#eee',
-                input: { background: '#f7f7f7', placeholder: '#aaa' },
-                shadow: { color: '#000' },
-            },
-        },
-    }),
-}));
-
 vi.mock('@/components/ui/lists/Item', () => ({
     Item: (props: any) => React.createElement('Item', props),
 }));
@@ -48,8 +30,9 @@ vi.mock('@/components/ui/forms/Switch', () => ({
     Switch: (props: any) => React.createElement('Switch', props),
 }));
 
-vi.mock('@/components/ui/text/StyledText', () => ({
+vi.mock('@/components/ui/text/Text', () => ({
     Text: (props: any) => React.createElement('Text', props, props.children),
+    TextInput: 'TextInput',
 }));
 
 vi.mock('@/components/ui/buttons/RoundButton', () => ({
@@ -61,6 +44,7 @@ vi.mock('@/agents/hooks/useEnabledAgentIds', () => ({
 }));
 
 vi.mock('@/agents/catalog/catalog', () => ({
+    AGENT_IDS: [],
     getAgentCore: () => ({ displayNameKey: 'agent.claude' }),
     isAgentId: () => true,
     DEFAULT_AGENT_ID: 'claude',
@@ -80,6 +64,7 @@ vi.mock('@/sync/domains/server/serverRuntime', () => ({
 
 vi.mock('@/sync/store/hooks', () => ({
     useAllMachines: () => [],
+    useLocalSetting: () => 1,
 }));
 
 vi.mock('@/sync/domains/state/storage', () => ({

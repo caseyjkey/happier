@@ -14,6 +14,8 @@ import { validateUsername } from "@/app/social/usernamePolicy";
 import { deleteOAuthStateAttemptBestEffort, loadValidOAuthStateAttempt } from "../connectRoutes.oauthStateAttempt";
 import { log } from "@/utils/logging/log";
 import { isServerFeatureEnabledForRequest } from "@/app/features/catalog/serverFeatureGate";
+import { readAuthOauthKeylessFeatureEnv } from "@/app/features/catalog/readFeatureEnv";
+import { resolveKeylessAccountsAvailability } from "@/app/features/e2ee/resolveKeylessAccountsEnabled";
 import {
     buildRedirectUrl,
     resolveOAuthPendingTtlMsFromEnv,
@@ -32,6 +34,7 @@ export function registerOAuthCallbackRoute(app: Fastify) {
                 .object({
                     state: z.string(),
                     code: z.string().optional(),
+                    iss: z.string().optional(),
                     error: z.string().optional(),
                     error_description: z.string().optional(),
                 })
@@ -48,7 +51,7 @@ export function registerOAuthCallbackRoute(app: Fastify) {
             return reply.redirect(buildRedirectUrl(webAppUrl, { error: "unsupported-provider" }));
         }
 
-        const { code, state } = request.query;
+        const { code, state, iss } = request.query;
         const oauthError = (request.query as any)?.error?.toString?.().trim?.() || "";
 
         const oauthState = await auth.verifyOauthStateToken(state);
@@ -82,7 +85,23 @@ export function registerOAuthCallbackRoute(app: Fastify) {
         }
 
         const flow = oauthState.flow;
-        const redirectBaseParams: Record<string, string> = { flow };
+        const authMode = flow === "auth" && oauthState.publicKey ? "keyed" : flow === "auth" ? "keyless" : null;
+        const redirectBaseParams: Record<string, string> =
+            flow === "auth" && authMode === "keyless" ? { flow, mode: "keyless" } : { flow };
+
+        if (flow === "auth" && authMode === "keyless") {
+            const keyless = readAuthOauthKeylessFeatureEnv(process.env);
+            if (!(keyless.enabled && keyless.providers.includes(providerId))) {
+                return reply.redirect(buildRedirectUrl(webAppUrl, { ...redirectBaseParams, error: "keyless_disabled" }));
+            }
+            const availability = resolveKeylessAccountsAvailability(process.env);
+            if (!availability.ok) {
+                return reply.redirect(buildRedirectUrl(webAppUrl, {
+                    ...redirectBaseParams,
+                    error: availability.reason === "e2ee-required" ? "e2ee_required" : "keyless_disabled",
+                }));
+            }
+        }
 
         if (flow === "connect" && !isServerFeatureEnabledForRequest("connectedServices", process.env)) {
             return reply.redirect(buildRedirectUrl(webAppUrl, { ...redirectBaseParams, error: "connect_disabled" }));
@@ -94,10 +113,14 @@ export function registerOAuthCallbackRoute(app: Fastify) {
 
         const userId = flow === "connect" ? oauthState.userId : null;
         const publicKeyHex = flow === "auth" ? oauthState.publicKey : null;
+        const proofHash = flow === "auth" ? oauthState.proofHash : null;
         if (flow === "connect" && !userId) {
             return reply.redirect(buildRedirectUrl(webAppUrl, { ...redirectBaseParams, error: "invalid_state" }));
         }
-        if (flow === "auth" && !publicKeyHex) {
+        if (flow === "auth" && authMode === "keyed" && !publicKeyHex) {
+            return reply.redirect(buildRedirectUrl(webAppUrl, { ...redirectBaseParams, error: "invalid_state" }));
+        }
+        if (flow === "auth" && authMode === "keyless" && !proofHash) {
             return reply.redirect(buildRedirectUrl(webAppUrl, { ...redirectBaseParams, error: "invalid_state" }));
         }
 
@@ -110,6 +133,7 @@ export function registerOAuthCallbackRoute(app: Fastify) {
                 env: process.env,
                 code,
                 state,
+                iss,
                 pkceCodeVerifier: attemptParsed.data.pkceCodeVerifier,
                 expectedNonce: attemptParsed.data.nonce,
             });
@@ -117,6 +141,18 @@ export function registerOAuthCallbackRoute(app: Fastify) {
             const login = provider.getLogin(profile) ?? "";
 
             if (flow === "auth") {
+                const providerUserId = provider.getProviderUserId(profile);
+                const alreadyLinked = providerUserId
+                    ? await db.accountIdentity.findFirst({
+                          where: {
+                              provider: providerId,
+                              providerUserId,
+                          },
+                          select: { id: true },
+                      })
+                    : null;
+                const isAlreadyLinked = Boolean(alreadyLinked);
+
                 const loginUsername = login ? login.toLowerCase() : null;
                 let suggestedUsername: string | null = null;
                 let usernameRequired = false;
@@ -125,22 +161,28 @@ export function registerOAuthCallbackRoute(app: Fastify) {
                 if (loginUsername) {
                     const loginValidation = validateUsername(loginUsername, process.env);
                     if (!loginValidation.ok) {
-                        usernameRequired = true;
-                        usernameReason = "invalid_login";
+                        if (!isAlreadyLinked) {
+                            usernameRequired = true;
+                            usernameReason = "invalid_login";
+                        }
                     } else {
                         suggestedUsername = loginValidation.username;
-                        const taken = await db.account.findFirst({
-                            where: { username: suggestedUsername },
-                            select: { id: true },
-                        });
-                        if (taken) {
-                            usernameRequired = true;
-                            usernameReason = "login_taken";
+                        if (!isAlreadyLinked) {
+                            const taken = await db.account.findFirst({
+                                where: { username: suggestedUsername },
+                                select: { id: true },
+                            });
+                            if (taken) {
+                                usernameRequired = true;
+                                usernameReason = "login_taken";
+                            }
                         }
                     }
                 } else {
-                    usernameRequired = true;
-                    usernameReason = "invalid_login";
+                    if (!isAlreadyLinked) {
+                        usernameRequired = true;
+                        usernameReason = "invalid_login";
+                    }
                 }
 
                 const pendingKey = `oauth_pending_${randomKeyNaked(24)}`;
@@ -150,6 +192,55 @@ export function registerOAuthCallbackRoute(app: Fastify) {
                 } catch {
                     return reply.redirect(buildRedirectUrl(webAppUrl, { ...redirectBaseParams, error: "invalid_profile" }));
                 }
+
+                if (authMode === "keyless") {
+                    const tokenEnc = privacyKit.encodeBase64(
+                        encryptString(["auth", "external", providerId, "pending_keyless", pendingKey, "token"], accessToken),
+                    );
+                    const profileEnc = privacyKit.encodeBase64(
+                        encryptString(["auth", "external", providerId, "pending_keyless", pendingKey, "profile"], profileJson),
+                    );
+                    const refreshTokenEnc =
+                        typeof refreshToken === "string" && refreshToken.trim()
+                            ? privacyKit.encodeBase64(
+                                  encryptString(
+                                      ["auth", "external", providerId, "pending_keyless", pendingKey, "refresh"],
+                                      refreshToken,
+                                  ),
+                              )
+                            : undefined;
+                    const ttlMs = resolveOAuthPendingTtlMsFromEnv(process.env);
+                    await db.repeatKey.create({
+                        data: {
+                            key: pendingKey,
+                            value: JSON.stringify({
+                                flow: "auth",
+                                provider: providerId,
+                                authMode: "keyless",
+                                proofHash: proofHash!,
+                                profileEnc,
+                                accessTokenEnc: tokenEnc,
+                                ...(refreshTokenEnc ? { refreshTokenEnc } : {}),
+                                suggestedUsername,
+                                usernameRequired,
+                                usernameReason,
+                            }),
+                            expiresAt: new Date(Date.now() + ttlMs),
+                        },
+                    });
+
+                    if (usernameRequired) {
+                        return reply.redirect(buildRedirectUrl(webAppUrl, {
+                            ...redirectBaseParams,
+                            status: "username_required",
+                            reason: usernameReason ?? "invalid_login",
+                            login,
+                            pending: pendingKey,
+                        }));
+                    }
+                    return reply.redirect(buildRedirectUrl(webAppUrl, { ...redirectBaseParams, pending: pendingKey }));
+                }
+
                 const tokenEnc = privacyKit.encodeBase64(
                     encryptString(["auth", "external", providerId, "pending", pendingKey, publicKeyHex!], accessToken),
                 );

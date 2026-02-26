@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { FeatureGateSchema, type FeatureGate } from './featureGate.js';
 
 const DEFAULT_GATE_DISABLED: FeatureGate = { enabled: false };
+const DEFAULT_GATE_ENABLED: FeatureGate = { enabled: true };
 
 const VoiceGateSchema = z.object({
   enabled: z.boolean(),
@@ -11,6 +12,19 @@ const VoiceGateSchema = z.object({
 
 export const FeatureGatesSchema = z.object({
   bugReports: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
+  e2ee: z
+    .object({
+      keylessAccounts: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
+    })
+    .optional()
+    .default({ keylessAccounts: DEFAULT_GATE_DISABLED }),
+  encryption: z
+    .object({
+      plaintextStorage: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
+      accountOptOut: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
+    })
+    .optional()
+    .default({ plaintextStorage: DEFAULT_GATE_DISABLED, accountOptOut: DEFAULT_GATE_DISABLED }),
   attachments: z
     .object({
       uploads: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
@@ -65,6 +79,15 @@ export const FeatureGatesSchema = z.object({
         })
         .optional()
         .default({ providerReset: DEFAULT_GATE_DISABLED }),
+      mtls: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
+      login: z
+        .object({
+          // Backward compatibility: older servers predate this gate but still support key-challenge login.
+          // Default to enabled unless a server explicitly disables it.
+          keyChallenge: FeatureGateSchema.optional().default(DEFAULT_GATE_ENABLED),
+        })
+        .optional()
+        .default({ keyChallenge: DEFAULT_GATE_ENABLED }),
       ui: z
         .object({
           recoveryKeyReminder: FeatureGateSchema.optional().default(DEFAULT_GATE_DISABLED),
@@ -75,6 +98,8 @@ export const FeatureGatesSchema = z.object({
     .optional()
     .default({
       recovery: { providerReset: DEFAULT_GATE_DISABLED },
+      mtls: DEFAULT_GATE_DISABLED,
+      login: { keyChallenge: DEFAULT_GATE_ENABLED },
       ui: { recoveryKeyReminder: DEFAULT_GATE_DISABLED },
     }),
 });

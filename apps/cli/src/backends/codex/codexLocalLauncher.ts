@@ -120,6 +120,7 @@ export async function codexLocalLauncher<TMode>(opts: {
   const knownResumeId: { value: string | null } = { value: null };
   const pendingMetadataSessionId: { value: string | null } = { value: null };
   let lastMetadataPublishAttemptMs = 0;
+  let inFlightMetadataPublish: Promise<void> | null = null;
   const debug = opts.debugMirroring === true;
 
   let exitReason: CodexLauncherResult | null = null;
@@ -163,6 +164,49 @@ export async function codexLocalLauncher<TMode>(opts: {
     );
   };
 
+  const publishPendingCodexSessionIdNow = async (): Promise<void> => {
+    const pending = pendingMetadataSessionId.value;
+    if (!pending) return;
+
+    if (inFlightMetadataPublish) {
+      await inFlightMetadataPublish.catch(() => undefined);
+      return;
+    }
+
+    const attempt = (async () => {
+      try {
+        const metadataSnapshotGetter = (opts.session as unknown as { getMetadataSnapshot?: () => unknown }).getMetadataSnapshot;
+        const metadata =
+          typeof metadataSnapshotGetter === 'function'
+            ? (metadataSnapshotGetter.call(opts.session) as Record<string, unknown> | null)
+            : null;
+        if (metadata && metadata.codexSessionId === pending) {
+          pendingMetadataSessionId.value = null;
+          return;
+        }
+
+        lastMetadataPublishAttemptMs = Date.now();
+        await Promise.resolve(
+          opts.session.updateMetadata((current) => ({
+            ...current,
+            codexSessionId: pending,
+          })),
+        );
+      } catch {
+        // Best-effort only; retry loop will keep trying.
+      }
+    })();
+
+    inFlightMetadataPublish = attempt;
+    try {
+      await attempt;
+    } finally {
+      if (inFlightMetadataPublish === attempt) {
+        inFlightMetadataPublish = null;
+      }
+    }
+  };
+
   const doSwitch = async (): Promise<void> => {
     if (switchRequested) return;
     switchRequested = true;
@@ -204,6 +248,7 @@ export async function codexLocalLauncher<TMode>(opts: {
       cwd: opts.path,
       env: process.env,
       stdio: interactive ? 'inherit' : 'pipe',
+      windowsHide: true,
     });
     const managedChild = createManagedChildProcess(child);
     child.once('error', (error) => {
@@ -318,6 +363,7 @@ export async function codexLocalLauncher<TMode>(opts: {
     }
 
     queueCodexSessionIdPublish(candidateFile.sessionMeta?.id);
+    await publishPendingCodexSessionIdNow();
     maybePublishPendingCodexSessionId();
 
     if (switchRequested) {
@@ -340,7 +386,10 @@ export async function codexLocalLauncher<TMode>(opts: {
       filePath: candidateFile.filePath,
       debug,
       session: opts.session,
-      onCodexSessionId: (id) => queueCodexSessionIdPublish(id),
+      onCodexSessionId: async (id) => {
+        queueCodexSessionIdPublish(id);
+        await publishPendingCodexSessionIdNow();
+      },
     });
     await mirror.start();
 

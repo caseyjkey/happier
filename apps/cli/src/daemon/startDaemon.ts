@@ -16,7 +16,7 @@ import { configuration } from '@/configuration';
 import { startCaffeinate, stopCaffeinate } from '@/integrations/caffeinate';
 import packageJson from '../../package.json';
 import { getEnvironmentInfo } from '@/ui/doctor';
-import { buildHappyCliSubprocessInvocation, spawnHappyCLI } from '@/utils/spawnHappyCLI';
+import { buildHappyCliSubprocessLaunchSpec, spawnHappyCLI } from '@/utils/spawnHappyCLI';
 import { AGENTS, getVendorResumeSupport, resolveAgentCliSubcommand, resolveCatalogAgentId } from '@/backends/catalog';
 import {
   writeDaemonState,
@@ -62,6 +62,7 @@ import { ensureSessionDirectory } from './startup/ensureSessionDirectory';
 import { waitForInitialCredentials } from './startup/waitForInitialCredentials';
 import { waitForSessionWebhook } from './spawn/waitForSessionWebhook';
 import { resolveSpawnChildEnvironment } from './spawn/resolveSpawnChildEnvironment';
+import { buildSpawnChildProcessEnv } from './spawn/buildSpawnChildProcessEnv';
 import { createSpawnConcurrencyGate } from './spawn/createSpawnConcurrencyGate';
 import { startAutomationWorker, type AutomationWorkerHandle } from './automation/automationWorker';
 import { startMemoryWorker, type MemoryWorkerHandle } from './memory/memoryWorker';
@@ -642,20 +643,18 @@ export async function startDaemon(): Promise<void> {
 		            env: process.env,
 		          });
 
-			          if (windowsConsoleMode === 'visible') {
-			            const { runtime, argv, env } = buildHappyCliSubprocessInvocation(args);
-			            const filePath = runtime === 'node' ? process.execPath : runtime;
-
-			            const started = await startHappySessionInVisibleWindowsConsole({
-			              filePath,
-			              args: argv,
-			              workingDirectory: directory,
-			              env: {
-			                ...process.env,
-			                ...extraEnvForChildWithMessage,
-			                ...(env ?? {}),
-			              },
-			            });
+				          if (windowsConsoleMode === 'visible') {
+				            const launchSpec = buildHappyCliSubprocessLaunchSpec(args);
+				            const started = await startHappySessionInVisibleWindowsConsole({
+				              filePath: launchSpec.filePath,
+				              args: launchSpec.args,
+				              workingDirectory: directory,
+				              env: {
+				                ...process.env,
+				                ...extraEnvForChildWithMessage,
+				                ...(launchSpec.env ?? {}),
+				              },
+				            });
 
 		            if (!started.ok) {
 		              logger.debug('[DAEMON RUN] Failed to spawn visible Windows console session', { error: started.errorMessage });
@@ -750,14 +749,15 @@ export async function startDaemon(): Promise<void> {
 			          }
 
 		          // NOTE: sessionId is reserved for future Happy session resume; we currently ignore it.
-		          const happyProcess = spawnHappyCLI(args, {
+	          const happyProcess = spawnHappyCLI(args, {
 		            cwd: directory,
 		            detached: true,  // Sessions stay alive when daemon stops
 	            stdio: ['ignore', 'pipe', 'pipe'],  // Capture stdout/stderr for debugging
-	            env: {
-	              ...process.env,
-	              ...extraEnvForChildWithMessage
-	            }
+	            windowsHide: true,
+	            env: buildSpawnChildProcessEnv({
+	              processEnv: process.env,
+	              extraEnv: extraEnvForChildWithMessage,
+	            })
 	          });
 
 	          // Log output for debugging

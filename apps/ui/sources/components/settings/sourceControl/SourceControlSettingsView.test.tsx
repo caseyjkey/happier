@@ -17,21 +17,7 @@ const setScmCommitMessageGeneratorInstructions = vi.fn();
 
 const modalPrompt = vi.fn();
 
-vi.mock('react-native', () => ({
-    View: 'View',
-    Text: 'Text',
-    TextInput: 'TextInput',
-}));
-
-vi.mock('react-native-unistyles', () => ({
-    useUnistyles: () => ({
-        theme: {
-            colors: {
-                textSecondary: '#999',
-            },
-        },
-    }),
-}));
+vi.mock('react-native', async () => await import('@/dev/reactNativeStub'));
 
 vi.mock('@expo/vector-icons', () => ({
     Ionicons: 'Ionicons',

@@ -13,6 +13,7 @@ import { systemPrompt } from "./utils/systemPrompt";
 import { restoreStdinBestEffort } from "@/ui/ink/restoreStdinBestEffort";
 import { isClaudeCliJavaScriptFile, resolveClaudeCliPath } from "./utils/resolveClaudeCliPath";
 import { isBun } from "@/utils/runtime";
+import { stripNestedSessionDetectionEnv } from "@/utils/processEnv/stripNestedSessionDetectionEnv";
 
 /**
  * Error thrown when the Claude process exits with a non-zero exit code.
@@ -222,26 +223,64 @@ export async function claudeLocal(opts: {
                 args.push('--allowedTools', opts.allowedTools.join(','));
             }
 
+            // Claude CLI treats the first non-flag token as the prompt. If a positional prompt
+            // is provided before later flags, those flags can be mis-parsed as prompt text.
+            // Ensure positional args come after all flags (including our injected --settings).
+            const flagArgs: string[] = [];
+            const positionalArgs: string[] = [];
+            const flagsWithValue = new Set<string>([
+                '--model',
+                '--permission-mode',
+                '--settings',
+                '--mcp-config',
+                '--allowedTools',
+                '--disallowedTools',
+                '--output-format',
+                '--input-format',
+                '--print',
+                '--append-system-prompt',
+                '--resume',
+                '--session-id',
+            ]);
+
+            if (opts.claudeArgs) {
+                for (let i = 0; i < opts.claudeArgs.length; i++) {
+                    const arg = opts.claudeArgs[i];
+                    if (arg.startsWith('-')) {
+                        flagArgs.push(arg);
+                        if (flagsWithValue.has(arg) && i + 1 < opts.claudeArgs.length) {
+                            flagArgs.push(opts.claudeArgs[i + 1]!);
+                            i++;
+                        }
+                        continue;
+                    }
+                    positionalArgs.push(arg);
+                }
+            }
+
             // Add hook settings for session tracking (when available)
             if (opts.hookSettingsPath) {
                 args.push('--settings', opts.hookSettingsPath);
                 logger.debug(`[ClaudeLocal] Using hook settings: ${opts.hookSettingsPath}`);
             }
 
-            // Add custom Claude arguments LAST (so prompt/slash commands are at the end)
-            if (opts.claudeArgs) {
-                args.push(...opts.claudeArgs)
+            // Add flag arguments before positional prompts.
+            if (flagArgs.length > 0) {
+                args.push(...flagArgs);
+            }
+            if (positionalArgs.length > 0) {
+                args.push(...positionalArgs);
             }
 
             // Prepare environment variables
             // Note: Local mode uses global Claude installation with --session-id flag
             // Launcher only intercepts fetch for thinking state tracking
-            const env: NodeJS.ProcessEnv = {
+            const env: NodeJS.ProcessEnv = stripNestedSessionDetectionEnv({
                 ...process.env,
                 ...opts.claudeEnvVars,
                 // Keep behavior consistent with our wrapper script.
                 DISABLE_AUTOUPDATER: '1',
-            }
+            })
 
             const resolvedClaudeCliPath = resolveClaudeCliPath();
             const shouldUseNodeLauncher = isClaudeCliJavaScriptFile(resolvedClaudeCliPath);
@@ -270,12 +309,14 @@ export async function claudeLocal(opts: {
                     signal: opts.abort,
                     cwd: opts.path,
                     env,
+                    windowsHide: true,
                 })
                 : spawn(resolvedClaudeCliPath, args, {
                     stdio: ['inherit', 'inherit', 'inherit', 'ignore'],
                     signal: opts.abort,
                     cwd: opts.path,
                     env,
+                    windowsHide: true,
                 });
 
             // Forward signals to child process to prevent orphaned processes

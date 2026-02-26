@@ -329,6 +329,33 @@ describe('claudeLocal --continue handling', () => {
             claudeArgs: [],
         })).resolves.toBeTruthy();
     });
+
+    it('places positional prompts after flags (so Claude can parse flags correctly)', async () => {
+        mockClaudeFindLastSession.mockReturnValue(null);
+
+        await claudeLocal({
+            abort: new AbortController().signal,
+            sessionId: null,
+            path: '/tmp',
+            onSessionFound,
+            hookSettingsPath: '/tmp/settings.json',
+            claudeArgs: ['--verbose', 'fix the bug in main.ts', '--model', 'opus'],
+        });
+
+        expect(mockSpawn).toHaveBeenCalled();
+        const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+
+        const settingsIndex = spawnArgs.indexOf('--settings');
+        const modelIndex = spawnArgs.indexOf('--model');
+        const promptIndex = spawnArgs.indexOf('fix the bug in main.ts');
+        expect(settingsIndex).toBeGreaterThan(-1);
+        expect(modelIndex).toBeGreaterThan(-1);
+        expect(promptIndex).toBeGreaterThan(-1);
+
+        // Prompt must be after all flags (including --settings).
+        expect(promptIndex).toBeGreaterThan(settingsIndex + 1);
+        expect(promptIndex).toBeGreaterThan(modelIndex + 1);
+    });
 });
 
 describe('claudeLocal launcher selection', () => {
@@ -415,5 +442,32 @@ describe('claudeLocal launcher selection', () => {
         const spawnOpts = mockSpawn.mock.calls[0][2];
         expect(spawnOpts?.env?.HAPPIER_CLAUDE_PATH).toBe('/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js');
         expect(spawnOpts?.env?.DISABLE_AUTOUPDATER).toBe('1');
+    });
+
+    it('strips nested Claude Code env vars from the spawned process environment', async () => {
+        const prevClaudeCode = process.env.CLAUDECODE;
+        const prevEntrypoint = process.env.CLAUDE_CODE_ENTRYPOINT;
+        process.env.CLAUDECODE = '1';
+        process.env.CLAUDE_CODE_ENTRYPOINT = 'parent';
+
+        try {
+            await claudeLocal({
+                abort: new AbortController().signal,
+                sessionId: null,
+                path: '/tmp',
+                onSessionFound,
+                claudeArgs: [],
+            });
+
+            expect(mockSpawn).toHaveBeenCalled();
+            const spawnOpts = mockSpawn.mock.calls[0][2];
+            expect(spawnOpts?.env?.CLAUDECODE).toBeUndefined();
+            expect(spawnOpts?.env?.CLAUDE_CODE_ENTRYPOINT).toBeUndefined();
+        } finally {
+            if (typeof prevClaudeCode === 'string') process.env.CLAUDECODE = prevClaudeCode;
+            else delete process.env.CLAUDECODE;
+            if (typeof prevEntrypoint === 'string') process.env.CLAUDE_CODE_ENTRYPOINT = prevEntrypoint;
+            else delete process.env.CLAUDE_CODE_ENTRYPOINT;
+        }
     });
 });

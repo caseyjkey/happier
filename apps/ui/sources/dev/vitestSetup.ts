@@ -136,6 +136,22 @@ vi.mock('@shopify/react-native-skia', () => ({
     rrect: () => ({}),
 }));
 
+// `react-native-typography` relies on React Native's platform resolution (e.g. systemWeights.web.js),
+// which Node/Vitest cannot resolve via CJS `require("../helpers/systemWeights")`. Provide a minimal
+// stub so components can render without pulling in platform-specific internals.
+vi.mock('react-native-typography', () => ({
+    iOSUIKit: {
+        title3: {},
+        title3Object: {},
+    },
+    human: {},
+    humanDense: {},
+    humanTall: {},
+    material: {},
+    materialDense: {},
+    materialTall: {},
+}));
+
 // `expo-constants` reads React Native `NativeModules` and isn't safe to import in Vitest.
 vi.mock('expo-constants', () => ({
     default: {
@@ -168,26 +184,84 @@ vi.mock('expo-secure-store', () => ({
 // `react-native-unistyles` requires a Babel plugin at runtime which isn't present in Vitest.
 // Provide a lightweight mock so view/components can render in tests.
 vi.mock('react-native-unistyles', () => {
+    // Keep this theme self-contained: many unit tests mock `react-native` and may omit Platform,
+    // so importing the real theme (which depends on Platform.select) would make those tests flaky.
     const theme = {
+        dark: false,
         colors: {
-            surface: '#fff',
+            //
+            // Main colors
+            //
+            text: '#000000',
+            textSecondary: '#666666',
+            textLink: '#2BACCC',
+            textDestructive: '#FF3B30',
+            warning: '#8E8E93',
+            success: '#34C759',
+            accent: {
+                blue: '#007AFF',
+                green: '#34C759',
+                orange: '#FF9500',
+                yellow: '#FFCC00',
+                red: '#FF3B30',
+                indigo: '#5856D6',
+                purple: '#AF52DE',
+            },
+            surface: '#ffffff',
+            surfaceRipple: 'rgba(0, 0, 0, 0.08)',
+            surfacePressed: '#f0f0f2',
             surfaceSelected: '#f2f2f2',
-            divider: '#ddd',
-            text: '#000',
-            textSecondary: '#666',
-            groupped: { sectionTitle: '#666', background: '#fff' },
-            header: { background: '#fff', tint: '#000' },
-            button: { primary: { tint: '#000' } },
-            shadow: { color: '#000', opacity: 0.2 },
-            modal: { border: '#ddd' },
-            switch: { track: { inactive: '#ccc', active: '#4ade80' }, thumb: { active: '#fff' } },
-            input: { background: '#eee' },
-            status: { error: '#ff3b30' },
-            box: { error: { background: '#fee', border: '#f99', text: '#900' } },
+            surfaceHigh: '#F8F8F8',
+            surfaceHighest: '#f0f0f0',
+            divider: '#eaeaea',
+            shadow: { color: '#000000', opacity: 0.1 },
+
+            //
+            // System components
+            //
+            groupped: { background: '#F5F5F5', chevron: '#C7C7CC', sectionTitle: '#8E8E93' },
+            header: { background: '#ffffff', tint: '#18171C' },
+            switch: { track: { inactive: '#dddddd', active: '#34C759' }, thumb: { active: '#FFFFFF', inactive: '#767577' } },
+            radio: { active: '#007AFF', inactive: '#C0C0C0', dot: '#007AFF' },
+            modal: { border: 'rgba(0, 0, 0, 0.1)' },
+            button: {
+                primary: { background: '#000000', tint: '#FFFFFF', disabled: '#C0C0C0' },
+                secondary: { tint: '#666666', surface: '#ffffff' },
+            },
+            input: { background: '#F5F5F5', text: '#000000', placeholder: '#999999' },
+
+            //
+            // Status / boxes
+            //
+            status: { error: '#ff3b30', connected: '#34C759', connecting: '#FFCC00', disconnected: '#999999', default: '#999999' },
+            box: {
+                error: { background: '#fee', border: '#f99', text: '#900' },
+                warning: { background: '#fff7e6', border: '#ffd591', text: '#ad6800' },
+            },
+
+            //
+            // Permission buttons
+            //
             permissionButton: {
-                allow: { background: '#0f0' },
-                deny: { background: '#f00' },
-                allowAll: { background: '#00f' },
+                allow: { background: '#34C759' },
+                deny: { background: '#FF3B30' },
+                allowAll: { background: '#007AFF' },
+                inactive: { background: '#dddddd' },
+            },
+
+            //
+            // Diff view palette (used by tool renderers)
+            //
+            diff: {
+                addedBg: '#e6ffed',
+                addedBorder: '#b7eb8f',
+                addedText: '#135200',
+                removedBg: '#ffecec',
+                removedBorder: '#ffa39e',
+                removedText: '#a8071a',
+                hunkHeaderBg: '#f5f5f5',
+                hunkHeaderText: '#666',
+                contextText: '#333',
             },
         },
     };
@@ -196,8 +270,13 @@ vi.mock('react-native-unistyles', () => {
         StyleSheet: {
             create: (styles: any) => (typeof styles === 'function' ? styles(theme) : styles),
             configure: () => {},
+            absoluteFillObject: {},
         },
         useUnistyles: () => ({ theme }),
-        UnistylesRuntime: { setRootViewBackgroundColor: () => {} },
+        UnistylesRuntime: {
+            setRootViewBackgroundColor: () => {},
+            setAdaptiveThemes: () => {},
+            setTheme: () => {},
+        },
     };
 });

@@ -11,7 +11,9 @@ import { Switch } from '@/components/ui/forms/Switch';
 import { sync } from '@/sync/sync';
 import { useSettings } from '@/sync/domains/state/storage';
 
-import { DEFAULT_NOTIFICATIONS_SETTINGS_V1, NotificationsSettingsV1Schema } from '@happier-dev/protocol';
+import { t } from '@/text';
+
+import { DEFAULT_NOTIFICATIONS_SETTINGS_V1, NotificationsSettingsV1Schema, type ForegroundBehavior } from '@happier-dev/protocol';
 
 export const NotificationsSettingsView = React.memo(function NotificationsSettingsView() {
     const { theme } = useUnistyles();
@@ -27,6 +29,7 @@ export const NotificationsSettingsView = React.memo(function NotificationsSettin
     }, [notificationsRaw]);
 
     const pushEnabled = notifications.pushEnabled !== false;
+    const foregroundBehavior: ForegroundBehavior = notifications.foregroundBehavior ?? 'full';
 
     const setNotifications = React.useCallback((next: Partial<typeof notifications>) => {
         sync.applySettings({
@@ -47,7 +50,7 @@ export const NotificationsSettingsView = React.memo(function NotificationsSettin
                 <Item
                     title="Enabled"
                     subtitle="Allow push notifications on this account"
-                    icon={<Ionicons name="notifications-outline" size={29} color="#007AFF" />}
+                    icon={<Ionicons name="notifications-outline" size={29} color={theme.colors.accent.blue} />}
                     rightElement={(
                         <Switch
                             value={pushEnabled}
@@ -65,7 +68,7 @@ export const NotificationsSettingsView = React.memo(function NotificationsSettin
                 <Item
                     title="Ready"
                     subtitle="Notify when a turn finishes and the agent is waiting for your command"
-                    icon={<Ionicons name="checkmark-circle-outline" size={29} color="#34C759" />}
+                    icon={<Ionicons name="checkmark-circle-outline" size={29} color={theme.colors.success} />}
                     rightElement={(
                         <Switch
                             value={notifications.ready !== false}
@@ -89,7 +92,39 @@ export const NotificationsSettingsView = React.memo(function NotificationsSettin
                     showChevron={false}
                 />
             </ItemGroup>
+
+            <ItemGroup
+                title={t('settingsNotifications.foregroundBehavior.title')}
+                footer={t('settingsNotifications.foregroundBehavior.footer')}
+            >
+                <Item
+                    title={t('settingsNotifications.foregroundBehavior.full')}
+                    subtitle={t('settingsNotifications.foregroundBehavior.fullDescription')}
+                    icon={<Ionicons name="volume-high-outline" size={29} color={theme.colors.accent.blue} />}
+                    selected={foregroundBehavior === 'full'}
+                    disabled={!pushEnabled}
+                    onPress={() => setNotifications({ foregroundBehavior: 'full' })}
+                    showChevron={false}
+                />
+                <Item
+                    title={t('settingsNotifications.foregroundBehavior.silent')}
+                    subtitle={t('settingsNotifications.foregroundBehavior.silentDescription')}
+                    icon={<Ionicons name="volume-off-outline" size={29} color={theme.colors.accent.blue} />}
+                    selected={foregroundBehavior === 'silent'}
+                    disabled={!pushEnabled}
+                    onPress={() => setNotifications({ foregroundBehavior: 'silent' })}
+                    showChevron={false}
+                />
+                <Item
+                    title={t('settingsNotifications.foregroundBehavior.off')}
+                    subtitle={t('settingsNotifications.foregroundBehavior.offDescription')}
+                    icon={<Ionicons name="notifications-off-outline" size={29} color={theme.colors.accent.blue} />}
+                    selected={foregroundBehavior === 'off'}
+                    disabled={!pushEnabled}
+                    onPress={() => setNotifications({ foregroundBehavior: 'off' })}
+                    showChevron={false}
+                />
+            </ItemGroup>
         </ItemList>
     );
 });
-

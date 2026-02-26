@@ -13,6 +13,7 @@ export const SectionList = 'SectionList' as any;
 export const Pressable = 'Pressable' as any;
 export const TouchableOpacity = 'TouchableOpacity' as any;
 export const TouchableWithoutFeedback = 'TouchableWithoutFeedback' as any;
+export const RefreshControl = 'RefreshControl' as any;
 export const TextInput = 'TextInput' as any;
 export const ActivityIndicator = 'ActivityIndicator' as any;
 export const Switch = 'Switch' as any;
@@ -36,7 +37,18 @@ export const Linking = {
     canOpenURL: async () => true,
     openURL: async () => {},
 } as const;
-export const StyleSheet = { create: (styles: any) => styles } as const;
+function flattenStyle(style: any): any {
+    if (style == null) return style;
+    if (Array.isArray(style)) {
+        return style.reduce((acc, entry) => ({ ...acc, ...(flattenStyle(entry) ?? {}) }), {});
+    }
+    if (typeof style === 'number') return {};
+    if (typeof style === 'object') return style;
+    return {};
+}
+export const StyleSheet = { create: (styles: any) => styles, flatten: flattenStyle } as const;
+// Many components spread this object into style definitions.
+(StyleSheet as any).absoluteFillObject = {};
 export const TurboModuleRegistry = { getEnforcing: () => ({}) } as const;
 export const registerCallableModule = () => {};
 

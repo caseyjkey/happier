@@ -10,6 +10,8 @@ import { resolveAuthFeature } from '@/app/features/authFeature';
 import { resolveConnectedServicesFeature } from '@/app/features/connectedServicesFeature';
 import { resolveUpdatesFeature } from '@/app/features/updatesFeature';
 import { resolveAttachmentsUploadsFeature } from '@/app/features/attachmentsUploadsFeature';
+import { resolveEncryptionFeature } from '@/app/features/encryptionFeature';
+import { resolveE2eeFeature } from '@/app/features/e2eeFeature';
 
 export type ServerFeatureResolver = (env: NodeJS.ProcessEnv) => FeaturesPayloadDelta;
 
@@ -24,4 +26,6 @@ export const serverFeatureRegistry: readonly ServerFeatureResolver[] = Object.fr
     (env) => resolveFriendsFeature(env),
     (env) => resolveOAuthFeature(env),
     (env) => resolveAuthFeature(env),
+    (env) => resolveEncryptionFeature(env),
+    (env) => resolveE2eeFeature(env),
 ]);

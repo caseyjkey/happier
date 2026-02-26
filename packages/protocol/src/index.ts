@@ -51,6 +51,20 @@ export { buildConnectedServiceCredentialRecord } from './connect/buildConnectedS
 export { parseBooleanEnv, parseOptionalBooleanEnv } from './env/parseBooleanEnv.js';
 
 export {
+  SessionStoredMessageContentSchema,
+  type SessionStoredMessageContent,
+} from './sessionMessages/sessionStoredMessageContent.js';
+
+export {
+  isSessionEncryptionModeAllowedByStoragePolicy,
+  isStoredContentKindAllowedForSessionByStoragePolicy,
+  resolveEffectiveDefaultAccountEncryptionMode,
+  resolveStoredContentKindForSessionEncryptionMode,
+  type SessionEncryptionMode,
+  type SessionStoredContentKind,
+} from './encryption/storagePolicyDecisions.js';
+
+export {
   BOX_BUNDLE_MIN_BYTES,
   BOX_BUNDLE_NONCE_BYTES,
   BOX_BUNDLE_PUBLIC_KEY_BYTES,
@@ -105,6 +119,19 @@ export {
   type RpcErrorCarrier,
 } from './rpcErrors.js';
 export { CHECKLIST_IDS, resumeChecklistId, type ChecklistId } from './checklists.js';
+export {
+  INSTALLABLES_CATALOG,
+  INSTALLABLE_KEYS,
+  CODEX_ACP_DEP_ID,
+  CODEX_ACP_DIST_TAG,
+  CODEX_MCP_RESUME_DEP_ID,
+  CODEX_MCP_RESUME_DIST_TAG,
+  type InstallableAutoUpdateMode,
+  type InstallableCatalogEntry,
+  type InstallableDefaultPolicy,
+  type InstallableKey,
+  type InstallableKind,
+} from './installables.js';
 export { SOCKET_RPC_EVENTS, type SocketRpcEvent } from './socketRpc.js';
 export {
   ChangeEntrySchema,
@@ -148,7 +175,7 @@ export {
   type UpdateStateAckResponse,
 } from './updates.js';
 
-export { SENT_FROM_VALUES, SentFromSchema, type SentFrom } from './sentFrom.js';
+export { SENT_FROM_VALUES, SentFromSchema, createSentFromSchema, type SentFrom } from './sentFrom.js';
 export {
   AuthStatusEnvelopeSchema,
   AuthStatusResultSchema,
@@ -194,6 +221,15 @@ export {
   SessionStatusResultSchema,
   SessionStopEnvelopeSchema,
   SessionStopResultSchema,
+  SessionShareSchema,
+  V2SessionByIdNotFoundSchema,
+  V2SessionByIdResponseSchema,
+  V2SessionListResponseSchema,
+  V2SessionMessageResponseSchema,
+  V2SessionRecordSchema,
+  V2_SESSION_LIST_CURSOR_V1_PREFIX,
+  decodeV2SessionListCursorV1,
+  encodeV2SessionListCursorV1,
   SessionSummarySchema,
   SessionWaitEnvelopeSchema,
   SessionWaitResultSchema,
@@ -222,9 +258,58 @@ export {
   type SessionSendResult,
   type SessionStatusResult,
   type SessionStopResult,
+  type SessionShare,
+  type V2SessionByIdNotFound,
+  type V2SessionByIdResponse,
+  type V2SessionListResponse,
+  type V2SessionMessageResponse,
+  type V2SessionRecord,
   type SessionSummary,
+  SessionMetadataSchema,
+  type SessionMetadata,
+  SessionSystemSessionV1Schema,
+  type SessionSystemSessionV1,
+  createSessionMetadataSchema,
+  createSessionSystemSessionV1Schema,
+  isHiddenSystemSession,
+  readSystemSessionMetadataFromMetadata,
+  buildSystemSessionMetadataV1,
   type SessionWaitResult,
 } from './sessionControl/contract.js';
+
+export {
+  ModelOverrideV1Schema,
+  type ModelOverrideV1,
+  createModelOverrideV1Schema,
+  buildModelOverrideV1,
+  AcpSessionModeOverrideV1Schema,
+  type AcpSessionModeOverrideV1,
+  createAcpSessionModeOverrideV1Schema,
+  buildAcpSessionModeOverrideV1,
+  AcpConfigOptionOverridesV1Schema,
+  type AcpConfigOptionOverridesV1,
+  createAcpConfigOptionOverridesV1Schema,
+  buildAcpConfigOptionOverridesV1,
+} from './sessionMetadata/metadataOverridesV1.js';
+
+export {
+  SessionTerminalMetadataSchema,
+  type SessionTerminalMetadata,
+  createSessionTerminalMetadataSchema,
+} from './sessionMetadata/terminalMetadata.js';
+
+export {
+  SESSION_PERMISSION_MODES,
+  SessionPermissionModeSchema,
+  type SessionPermissionMode,
+  createSessionPermissionModeSchema,
+} from './sessionMetadata/sessionPermissionModes.js';
+
+export {
+  SessionMessageMetaSchema,
+  type SessionMessageMeta,
+  createSessionMessageMetaSchema,
+} from './sessionMessages/sessionMessageMeta.js';
 export {
   ServerAddEnvelopeSchema,
   ServerAddResultSchema,
@@ -262,6 +347,9 @@ export {
   ScmCapabilitiesSchema,
   ScmChangeApplyRequestSchema,
   ScmChangeApplyResponseSchema,
+  ScmChangeDiscardEntrySchema,
+  ScmChangeDiscardRequestSchema,
+  ScmChangeDiscardResponseSchema,
   ScmCommitBackoutRequestSchema,
   ScmCommitBackoutResponseSchema,
   ScmCommitPatchSchema,
@@ -303,6 +391,9 @@ export {
   type ScmCapabilities,
   type ScmChangeApplyRequest,
   type ScmChangeApplyResponse,
+  type ScmChangeDiscardEntry,
+  type ScmChangeDiscardRequest,
+  type ScmChangeDiscardResponse,
   type ScmCommitBackoutRequest,
   type ScmCommitBackoutResponse,
   type ScmCommitPatch,
@@ -668,6 +759,13 @@ export {
   type AccountProfileResponse,
   type LinkedProvider,
 } from './account/profile.js';
+
+export {
+  AccountEncryptionModeResponseSchema,
+  AccountEncryptionModeUpdateRequestSchema,
+  type AccountEncryptionModeResponse,
+  type AccountEncryptionModeUpdateRequest,
+} from './account/encryptionMode.js';
 
 export {
   ACCOUNT_SETTINGS_SUPPORTED_SCHEMA_VERSION,

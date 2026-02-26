@@ -211,6 +211,75 @@ describe("featuresRoutes", () => {
         });
     });
 
+    describe("auth login", () => {
+        it("reports key-challenge login enabled by default", async () => {
+            const payload = await getFeaturesPayload();
+            expect(payload.features.auth.login.keyChallenge.enabled).toBe(true);
+            expect(payload.capabilities.auth.login.methods).toEqual(
+                expect.arrayContaining([{ id: "key_challenge", enabled: true }]),
+            );
+        });
+
+        it("reports key-challenge login disabled when HAPPIER_FEATURE_AUTH_LOGIN__KEY_CHALLENGE_ENABLED=0", async () => {
+            process.env.HAPPIER_FEATURE_AUTH_LOGIN__KEY_CHALLENGE_ENABLED = "0";
+
+            const payload = await getFeaturesPayload();
+            expect(payload.features.auth.login.keyChallenge.enabled).toBe(false);
+            expect(payload.capabilities.auth.login.methods).toEqual(
+                expect.arrayContaining([{ id: "key_challenge", enabled: false }]),
+            );
+        });
+    });
+
+    describe("auth mtls", () => {
+        it("exposes mtls policy details under capabilities.auth.mtls.policy", async () => {
+            process.env.HAPPIER_FEATURE_AUTH_MTLS__ENABLED = "1";
+            process.env.HAPPIER_FEATURE_AUTH_MTLS__MODE = "forwarded";
+            process.env.HAPPIER_FEATURE_AUTH_MTLS__TRUST_FORWARDED_HEADERS = "1";
+            process.env.HAPPIER_FEATURE_AUTH_MTLS__ALLOWED_ISSUERS = "CN=Example Root CA\ncn=Example Intermediate CA";
+            process.env.HAPPIER_FEATURE_AUTH_MTLS__ALLOWED_EMAIL_DOMAINS = "example.com, example.org";
+
+            const payload = await getFeaturesPayload();
+            expect(payload.capabilities.auth.mtls).toEqual(
+                expect.objectContaining({
+                    policy: {
+                        trustForwardedHeaders: true,
+                        issuerAllowlist: { enabled: true, count: 2 },
+                        emailDomainAllowlist: { enabled: true, count: 2 },
+                    },
+                }),
+            );
+        });
+    });
+
+    describe("encryption", () => {
+        it("reports required_e2ee by default", async () => {
+            const payload = await getFeaturesPayload();
+            expect(payload.features.encryption.plaintextStorage.enabled).toBe(false);
+            expect(payload.features.encryption.accountOptOut.enabled).toBe(false);
+            expect(payload.capabilities.encryption).toEqual({
+                storagePolicy: "required_e2ee",
+                allowAccountOptOut: false,
+                defaultAccountMode: "e2ee",
+            });
+        });
+
+        it("reports plaintext storage enabled when policy is optional", async () => {
+            process.env.HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY = "optional";
+            process.env.HAPPIER_FEATURE_ENCRYPTION__ALLOW_ACCOUNT_OPTOUT = "1";
+            process.env.HAPPIER_FEATURE_ENCRYPTION__DEFAULT_ACCOUNT_MODE = "plain";
+
+            const payload = await getFeaturesPayload();
+            expect(payload.features.encryption.plaintextStorage.enabled).toBe(true);
+            expect(payload.features.encryption.accountOptOut.enabled).toBe(true);
+            expect(payload.capabilities.encryption).toEqual({
+                storagePolicy: "optional",
+                allowAccountOptOut: true,
+                defaultAccountMode: "plain",
+            });
+        });
+    });
+
     describe("auth misconfiguration", () => {
         it("surfaces misconfig when AUTH_PROVIDERS_CONFIG_JSON is invalid", async () => {
             process.env.AUTH_PROVIDERS_CONFIG_JSON = "{ definitely: not-json }";

@@ -37,34 +37,11 @@ vi.mock('@expo/vector-icons', () => {
     };
 });
 
-vi.mock('react-native-unistyles', () => {
-    const theme = {
-        dark: false,
-        colors: {
-            surface: '#ffffff',
-            surfacePressed: '#f1f1f1',
-            surfacePressedOverlay: '#f7f7f7',
-            divider: 'rgba(0,0,0,0.12)',
-            text: '#111111',
-            textSecondary: '#666666',
-            textDestructive: '#cc0000',
-            deleteAction: '#cc0000',
-            button: { secondary: { tint: '#111111' } },
-        },
-    };
-
-    return {
-        StyleSheet: { create: (factory: any) => factory(theme, {}) },
-        useUnistyles: () => ({
-            theme,
-        }),
-    };
-});
-
 vi.mock('react-native', () => {
     const React = require('react');
     return {
         Platform: { OS: 'ios', select: (m: any) => m?.ios ?? m?.default },
+        AppState: { addEventListener: () => ({ remove: () => {} }) },
         InteractionManager: { runAfterInteractions: () => {} },
         useWindowDimensions: () => ({ width: 320, height: 800 }),
         StyleSheet: {

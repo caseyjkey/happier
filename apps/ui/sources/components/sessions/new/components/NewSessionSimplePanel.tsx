@@ -1,6 +1,6 @@
 import * as React from 'react';
 import type { ViewStyle } from 'react-native';
-import { Platform, Pressable, Text, View } from 'react-native';
+import { Platform, Pressable, View } from 'react-native';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { ItemGroup } from '@/components/ui/lists/ItemGroup';
 import { SessionTypeSelectorRows } from '@/components/ui/forms/SessionTypeSelector';
@@ -15,6 +15,8 @@ import { useAttachmentsUploadConfig } from '@/components/sessions/attachments/us
 import { useAttachmentDraftManager } from '@/components/sessions/attachments/useAttachmentDraftManager';
 import { formatAttachmentsBlock, uploadAttachmentDraftsToSession } from '@/components/sessions/attachments/uploadAttachmentDraftsToSession';
 import { sync } from '@/sync/sync';
+import { Text } from '@/components/ui/text/Text';
+
 
 export function NewSessionSimplePanel(props: Readonly<{
     popoverBoundaryRef: React.RefObject<View>;
@@ -174,6 +176,7 @@ export function NewSessionSimplePanel(props: Readonly<{
                                 width: '100%',
                                 alignSelf: 'center',
                                 paddingTop: props.safeAreaTop + props.newSessionTopPadding,
+                                ...(Platform.OS !== 'web' ? { marginTop: 'auto' } : {}),
                             }}
                         >
                             {/* Session type selector only if enabled via experiments */}

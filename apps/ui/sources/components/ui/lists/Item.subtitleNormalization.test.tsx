@@ -9,6 +9,7 @@ vi.mock('react-native', () => ({
     Text: 'Text',
     Pressable: 'Pressable',
     ActivityIndicator: 'ActivityIndicator',
+    AppState: { addEventListener: vi.fn(() => ({ remove: vi.fn() })) },
     Platform: {
         OS: 'web',
         select: (values: any) => values?.default ?? values?.web ?? values?.ios ?? values?.android,
@@ -51,7 +52,10 @@ vi.mock('react-native-unistyles', () => ({
             },
         },
     }),
-    StyleSheet: { create: (fn: any) => fn({ colors: { groupped: { background: '#111', chevron: '#888' }, divider: '#444' } }, {}) },
+    StyleSheet: {
+        create: (input: any) =>
+            typeof input === 'function' ? input({ colors: { groupped: { background: '#111', chevron: '#888' }, divider: '#444' } }, {}) : input,
+    },
 }));
 
 vi.mock('@/constants/Typography', () => ({

@@ -303,28 +303,17 @@ jobs:
           yarn --cwd apps/ui test:unit
           yarn --cwd apps/ui test:integration
 
-      - name: Commit version bump (source ref)
-        if: steps.bump_app.outputs.skipped != 'true'
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add apps/ui/package.json apps/ui/app.config.js
-          if [ -d apps/ui/src-tauri ]; then
-            git add apps/ui/src-tauri || true
-          fi
-          git commit -m "chore(release): bump app to v${{ steps.bump_app.outputs.version }}"
-
-      - name: Push source ref (only for branches)
+      - name: Commit + push version bump (pipeline)
         if: steps.bump_app.outputs.skipped != 'true'
         run: |
           set -euo pipefail
           src="${{ steps.resolve.outputs.ref }}"
-          if git show-ref --verify --quiet "refs/remotes/origin/$src"; then
-            git push origin "HEAD:refs/heads/$src"
-          else
-            echo "Skipping push: '$src' is not a known branch ref."
-          fi
+          node scripts/pipeline/run.mjs github-commit-and-push \
+            --paths "apps/ui/package.json,apps/ui/app.config.js,apps/ui/src-tauri" \
+            --allow-missing true \
+            --message "chore(release): bump app to v${{ steps.bump_app.outputs.version }}" \
+            --push-ref "${src}" \
+            --push-mode auto
 
       - name: Capture release SHA
         id: release_sha
@@ -338,7 +327,7 @@ jobs:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
           set -euo pipefail
-          node scripts/pipeline/expo/ota-update.mjs \
+          node scripts/pipeline/run.mjs expo-ota \
             --environment "${{ inputs.environment }}" \
             --message "${{ inputs.expo_update_message }}" \
             --eas-cli-version "${EAS_CLI_VERSION}"
@@ -386,6 +375,18 @@ jobs:
             --release-message "${{ inputs.expo_update_message }}" \
             --secrets-source env
 
+      - name: Resolve deploy branch SHA (before)
+        if: inputs.deploy_web
+        id: deploy_before
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ref="deploy/${{ inputs.environment }}/ui"
+          sha="$(gh api "repos/${{ github.repository }}/git/ref/heads/${ref}" --jq .object.sha 2>/dev/null || true)"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
       - name: Promote source ref to deploy branch (web)
         if: inputs.deploy_web
         env:
@@ -393,26 +394,47 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          node scripts/pipeline/github/promote-deploy-branch.mjs \
+          node scripts/pipeline/run.mjs promote-deploy-branch \
             --deploy-environment "${{ inputs.environment }}" \
             --component ui \
             --sha "$(git rev-parse HEAD)" \
             --summary-file "${GITHUB_STEP_SUMMARY}"
 
-      - name: Trigger deploy webhook(s) (web)
+      - name: Resolve deploy branch SHA (after)
         if: inputs.deploy_web
+        id: deploy_after
         env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ref="deploy/${{ inputs.environment }}/ui"
+          sha="$(gh api "repos/${{ github.repository }}/git/ref/heads/${ref}" --jq .object.sha 2>/dev/null || true)"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger deploy webhook(s) (web) (force_deploy, no branch change)
+        if: inputs.deploy_web && inputs.force_deploy && steps.deploy_before.outputs.sha == steps.deploy_after.outputs.sha
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
           CF_WEBHOOK_DEPLOY_CLIENT_ID: ${{ secrets.CF_WEBHOOK_DEPLOY_CLIENT_ID }}
           CF_WEBHOOK_DEPLOY_CLIENT_SECRET: ${{ secrets.CF_WEBHOOK_DEPLOY_CLIENT_SECRET }}
           DEPLOY_WEBHOOK_URL: ${{ vars.DEPLOY_WEBHOOK_URL != '' && vars.DEPLOY_WEBHOOK_URL || secrets.DEPLOY_WEBHOOK_URL }}
           HAPPIER_UI_DEPLOY_WEBHOOKS: ${{ vars.HAPPIER_UI_DEPLOY_WEBHOOKS != '' && vars.HAPPIER_UI_DEPLOY_WEBHOOKS || secrets.HAPPIER_UI_DEPLOY_WEBHOOKS }}
         run: |
           set -euo pipefail
-          node scripts/pipeline/deploy/trigger-webhooks.mjs \
-            --environment "${{ inputs.environment }}" \
+          node scripts/pipeline/run.mjs deploy \
+            --deploy-environment "${{ inputs.environment }}" \
             --component "ui" \
             --repository "${{ github.repository }}" \
             --ref-name "deploy/${{ inputs.environment }}/ui"
+
+      - name: Deploy note (web)
+        if: inputs.deploy_web
+        run: |
+          set -euo pipefail
+          echo "Web deployment is triggered automatically by pushes to deploy/${{ inputs.environment }}/ui." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- deploy_branch_sha: \`${{ steps.deploy_after.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
 
   expo_local_build:
     name: Expo native build (local runners)

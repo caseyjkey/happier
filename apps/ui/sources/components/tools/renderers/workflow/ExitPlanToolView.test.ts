@@ -22,28 +22,6 @@ vi.mock('@/modal', () => ({
     },
 }));
 
-vi.mock('react-native', () => ({
-    View: 'View',
-    Text: 'Text',
-    TouchableOpacity: 'TouchableOpacity',
-    ActivityIndicator: 'ActivityIndicator',
-    TextInput: 'TextInput',
-}));
-
-vi.mock('react-native-unistyles', () => ({
-    StyleSheet: { create: (styles: any) => styles },
-    useUnistyles: () => ({
-        theme: {
-            colors: {
-                button: { primary: { background: '#00f', tint: '#fff' } },
-                divider: '#ddd',
-                text: '#000',
-                textSecondary: '#666',
-            },
-        },
-    }),
-}));
-
 vi.mock('@expo/vector-icons', () => ({
     Ionicons: 'Ionicons',
 }));
@@ -161,23 +139,28 @@ describe('ExitPlanToolView', () => {
     });
 
     it('shows an error when requesting plan changes fails', async () => {
+        const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
         sessionDeny.mockRejectedValueOnce(new Error('network'));
 
-        const tree = await renderView(makeRunningTool());
+        try {
+            const tree = await renderView(makeRunningTool());
 
-        await act(async () => {
-            await tree.root.findByProps({ testID: 'exit-plan-request-changes' }).props.onPress();
-        });
+            await act(async () => {
+                await tree.root.findByProps({ testID: 'exit-plan-request-changes' }).props.onPress();
+            });
 
-        await act(async () => {
-            tree.root.findByProps({ testID: 'exit-plan-request-changes-input' }).props.onChangeText('Please change step 2');
-        });
+            await act(async () => {
+                tree.root.findByProps({ testID: 'exit-plan-request-changes-input' }).props.onChangeText('Please change step 2');
+            });
 
-        await act(async () => {
-            await tree.root.findByProps({ testID: 'exit-plan-request-changes-send' }).props.onPress();
-        });
+            await act(async () => {
+                await tree.root.findByProps({ testID: 'exit-plan-request-changes-send' }).props.onPress();
+            });
 
-        expect(modalAlert).toHaveBeenCalledWith('common.error', 'tools.exitPlanMode.requestChangesFailed');
+            expect(modalAlert).toHaveBeenCalledWith('common.error', 'tools.exitPlanMode.requestChangesFailed');
+        } finally {
+            consoleErrorSpy.mockRestore();
+        }
     });
 
     it('shows an error when requesting changes is attempted without text', async () => {

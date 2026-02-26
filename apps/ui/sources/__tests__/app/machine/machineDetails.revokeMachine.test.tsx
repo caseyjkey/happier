@@ -9,7 +9,7 @@ const itemSpy = vi.fn();
 const routerMock = { back: vi.fn(), push: vi.fn(), replace: vi.fn() };
 const confirmSpy = vi.fn<(..._args: any[]) => Promise<boolean>>(async () => true);
 const refreshMachinesThrottledSpy = vi.fn(async () => {});
-const revokeSpy = vi.fn(async () => ({ ok: true as const }));
+const revokeSpy = vi.fn(async (_machineId: string) => ({ ok: true as const }));
 
 vi.mock('react-native-reanimated', () => ({}));
 
@@ -61,7 +61,33 @@ vi.mock('react-native-unistyles', () => ({
             }
         }
     }),
-    StyleSheet: { create: (fn: any) => fn({ colors: { header: { tint: '#000' }, input: { background: '#fff', text: '#000' }, groupped: { background: '#fff', sectionTitle: '#000' }, divider: '#ddd', button: { primary: { background: '#000', tint: '#fff' } }, text: '#000', textSecondary: '#666', surface: '#fff', surfaceHigh: '#fff', shadow: { color: '#000', opacity: 0.1 }, status: { error: '#f00', connected: '#0f0', connecting: '#ff0', disconnected: '#999', default: '#999' }, permissionButton: { inactive: { background: '#ccc' } } } }) },
+    StyleSheet: {
+        create: (input: any) =>
+            typeof input === 'function'
+                ? input({
+                    colors: {
+                        header: { tint: '#000' },
+                        input: { background: '#fff', text: '#000' },
+                        groupped: { background: '#fff', sectionTitle: '#000' },
+                        divider: '#ddd',
+                        button: { primary: { background: '#000', tint: '#fff' } },
+                        text: '#000',
+                        textSecondary: '#666',
+                        surface: '#fff',
+                        surfaceHigh: '#fff',
+                        shadow: { color: '#000', opacity: 0.1 },
+                        status: {
+                            error: '#f00',
+                            connected: '#0f0',
+                            connecting: '#ff0',
+                            disconnected: '#999',
+                            default: '#999',
+                        },
+                        permissionButton: { inactive: { background: '#ccc' } },
+                    },
+                })
+                : input,
+    },
 }));
 
 vi.mock('@/constants/Typography', () => ({ Typography: { default: () => ({}) } }));
@@ -82,7 +108,7 @@ vi.mock('@/components/ui/forms/Switch', () => ({ Switch: () => null }));
 vi.mock('@/components/machines/InstallableDepInstaller', () => ({ InstallableDepInstaller: () => null }));
 vi.mock('@/components/sessions/runs/ExecutionRunRow', () => ({ ExecutionRunRow: () => null }));
 
-vi.mock('@/modal', () => ({ Modal: { alert: vi.fn(), confirm: (...args: any[]) => confirmSpy(...args), prompt: vi.fn(), show: vi.fn() } }));
+vi.mock('@/modal', () => ({ Modal: { alert: vi.fn(), confirm: confirmSpy, prompt: vi.fn(), show: vi.fn() } }));
 
 vi.mock('@/sync/ops', () => ({
     machineSpawnNewSession: vi.fn(async () => ({ type: 'error', errorCode: 'unexpected', errorMessage: 'noop' })),
@@ -90,7 +116,7 @@ vi.mock('@/sync/ops', () => ({
     machineStopSession: vi.fn(async () => ({ ok: true })),
     machineUpdateMetadata: vi.fn(async () => ({})),
     machineExecutionRunsList: vi.fn(async () => ({ ok: true, runs: [] })),
-    machineRevokeFromAccount: (...args: any[]) => revokeSpy(...args),
+    machineRevokeFromAccount: revokeSpy,
 }));
 
 vi.mock('@/sync/ops/sessionExecutionRuns', () => ({
@@ -133,13 +159,13 @@ vi.mock('@/hooks/session/useNavigateToSession', () => ({ useNavigateToSession: (
 vi.mock('@/hooks/server/useMachineCapabilitiesCache', () => ({ useMachineCapabilitiesCache: () => ({ state: { status: 'idle' }, refresh: vi.fn() }) }));
 vi.mock('@/sync/domains/server/serverProfiles', () => ({ getActiveServerId: () => 'server-a' }));
 vi.mock('@/sync/domains/server/activeServerSwitch', () => ({ setActiveServerAndSwitch: vi.fn(async () => true) }));
-vi.mock('@/sync/sync', () => ({ sync: { refreshMachinesThrottled: (...args: any[]) => refreshMachinesThrottledSpy(...args), refreshMachines: vi.fn(), retryNow: vi.fn() } }));
+vi.mock('@/sync/sync', () => ({ sync: { refreshMachinesThrottled: refreshMachinesThrottledSpy, refreshMachines: vi.fn(), retryNow: vi.fn() } }));
 vi.mock('@/utils/sessions/machineUtils', () => ({ isMachineOnline: () => true }));
 vi.mock('@/utils/sessions/sessionUtils', () => ({ formatPathRelativeToHome: () => '', getSessionName: () => '', getSessionSubtitle: () => '' }));
 vi.mock('@/utils/path/pathUtils', () => ({ resolveAbsolutePath: () => '' }));
 vi.mock('@/sync/domains/settings/terminalSettings', () => ({ resolveTerminalSpawnOptions: () => ({}) }));
 vi.mock('@/sync/domains/session/spawn/windowsRemoteSessionConsole', () => ({ resolveWindowsRemoteSessionConsoleFromMachineMetadata: () => 'visible' }));
-vi.mock('@/capabilities/installableDepsRegistry', () => ({ getInstallableDepRegistryEntries: () => [] }));
+vi.mock('@/capabilities/installablesRegistry', () => ({ getInstallablesRegistryEntries: () => [] }));
 
 describe('MachineDetailScreen (revoke/forget machine)', () => {
     beforeEach(() => {
@@ -176,4 +202,3 @@ describe('MachineDetailScreen (revoke/forget machine)', () => {
         expect(routerMock.back).toHaveBeenCalled();
     });
 });
-

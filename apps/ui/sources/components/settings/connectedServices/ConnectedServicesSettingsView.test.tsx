@@ -41,6 +41,7 @@ vi.mock('@/sync/store/hooks', () => ({
         connectedServicesDefaultProfileByServiceId: {},
         connectedServicesProfileLabelByKey: {},
     }),
+    useLocalSetting: () => 1,
 }));
 
 vi.mock('@/components/ui/lists/ItemList', () => ({
@@ -55,8 +56,9 @@ vi.mock('@/components/ui/lists/Item', () => ({
     Item: (props: any) => React.createElement('Item', props),
 }));
 
-vi.mock('@/components/ui/text/StyledText', () => ({
+vi.mock('@/components/ui/text/Text', () => ({
     Text: 'Text',
+    TextInput: 'TextInput',
 }));
 
 vi.mock('@/modal', () => ({
